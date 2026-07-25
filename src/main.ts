@@ -1,315 +1,155 @@
 import '@fontsource-variable/noto-sans-sc';
 import './style.css';
-import type { AppState, Drive, MappingInput, MappingProfile, MediaFile } from './types';
+import type { AppState, CopyPreset, DirectoryEntry, Drive, MappingInput, MappingProfile, MediaFile, Repository, RepositoryType } from './types';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
-let state: AppState;
-let drives: Drive[] = [];
-let selectedSource = '';
-let selectedMappingId = '';
-let editorBuffer: MappingInput | null = null;
-let activeView: 'mappings' | 'media' | 'activity' | 'source' = 'mappings';
-let mediaMode: 'list' | 'tree' = 'list';
-let busyAction = '';
-let mappingSearch = '';
-let fileSearch = '';
-let filterExtension = '';
-let filterStart = '';
-let filterEnd = '';
-let toastTimer = 0;
-let deleteConfirmOpen = false;
+type View = 'mappings' | 'media' | 'activity' | 'copy' | 'repositories' | 'settings' | 'source';
+let state: AppState; let drives: Drive[] = []; let activeView: View = 'media'; let selectedSourceUuid = ''; let selectedMappingId = '';
+let editorBuffer: MappingInput | null = null; let deleteConfirmOpen = false; let busyAction = ''; let toastTimer = 0;
+let fileSearch = ''; let filterExtension = ''; let filterStart = ''; let filterEnd = ''; let mediaMode: 'list' | 'tree' = 'list';
+let rawPath = ''; let rawEntries: DirectoryEntry[] = []; let rawBusy = false;
+let selectedRepositoryId = ''; let repositoryDraft: Partial<Repository> | null = null;
+let copySelected = new Set<string>(); let copySourceUuid = ''; let copyRepositoryId = ''; let copyExtensions: string[] = []; let copyStart = ''; let copyEnd = ''; let copyNote = ''; let copyTemplate = '%day/%note'; let copyMode: 'flat' | 'original' = 'flat';
 
-const commonExtensions = ['.mov', '.mp4', '.mxf', '.r3d', '.braw', '.wav', '.jpg'];
-const chartColors = ['#4d8df7', '#7c5ce5', '#2fb59a', '#ef9a3c', '#e85f74', '#66a94f', '#47a8c9', '#9c6c4b'];
-const icon = (name: 'folder' | 'drive' | 'map' | 'media' | 'chart' | 'plus' | 'play' | 'search' | 'list' | 'tree') => ({
-  folder: '<path d="M3 7h7l2 2h9v10H3V7Z"/>',
-  drive: '<path d="M5 4h14v16H5V4Zm3 11h8M9 8h6m2 9h.01"/>',
-  map: '<path d="m4 6 5-2 6 2 5-2v14l-5 2-6-2-5 2V6Zm5-2v14m6-12v14"/>',
-  media: '<path d="M4 5h16v14H4V5Zm4 0v14m8-14v14M4 9h4m8 0h4M4 15h4m8 0h4"/>',
-  chart: '<path d="M5 19V9m7 10V5m7 14v-7"/>',
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  play: '<path d="m9 6 9 6-9 6V6Z"/>',
-  search: '<circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/>',
-  list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
-  tree: '<path d="M6 4v16m0-12h5m-5 8h5m0-11v6h7m-7 2v6h7"/>'
-})[name];
-const svg = (name: Parameters<typeof icon>[0]) => `<svg viewBox="0 0 24 24">${icon(name)}</svg>`;
+const commonExtensions = ['.mov', '.mp4', '.mxf', '.r3d', '.braw', '.wav', '.jpg', '.dng'];
+const chartColors = ['#4d8df7', '#8b6ce4', '#2fb59a', '#ef9a3c', '#e85f74', '#66a94f', '#47a8c9', '#9c6c4b'];
+const icons: Record<string, string> = {
+  folder: '<path d="M3 7h7l2 2h9v10H3V7Z"/>', drive: '<path d="M5 4h14v16H5V4Zm3 11h8M9 8h6m2 9h.01"/>',
+  map: '<path d="m4 6 5-2 6 2 5-2v14l-5 2-6-2-5 2V6Zm5-2v14m6-12v14"/>', media: '<path d="M4 5h16v14H4V5Zm4 0v14m8-14v14M4 9h4m8 0h4M4 15h4m8 0h4"/>',
+  chart: '<path d="M5 19V9m7 10V5m7 14v-7"/>', plus: '<path d="M12 5v14M5 12h14"/>', play: '<path d="m9 6 9 6-9 6V6Z"/>',
+  search: '<circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/>', list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
+  tree: '<path d="M6 4v16m0-12h5m-5 8h5m0-11v6h7m-7 2v6h7"/>', copy: '<rect x="7" y="7" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  storage: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
+  back: '<path d="m15 18-6-6 6-6"/>', pause: '<path d="M9 5v14m6-14v14"/>'
+};
+const svg = (name: string) => `<svg viewBox="0 0 24 24">${icons[name]}</svg>`;
+const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]!);
+function formatBytes(value = 0) { if (!value) return '0 B'; const units = ['B', 'KB', 'MB', 'GB', 'TB']; const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4); return `${(value / 1024 ** index).toFixed(index > 2 ? 2 : 1)} ${units[index]}`; }
+const formatRate = (value = 0) => value < 1024 ? '0 KB/s' : `${formatBytes(value)}/s`;
+function formatDate(value?: string | null) { return value ? new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '从未运行'; }
+function localDay(value: string) { const d = new Date(value); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function showToast(message: string, type: 'success' | 'error' = 'success') { let toast = document.querySelector<HTMLDivElement>('.toast'); if (!toast) { toast = document.createElement('div'); toast.className = 'toast'; document.body.appendChild(toast); } toast.textContent = message; toast.dataset.type = type; toast.classList.add('visible'); clearTimeout(toastTimer); toastTimer = window.setTimeout(() => toast?.classList.remove('visible'), 3500); }
+function currentDrive() { return drives.find((drive) => drive.uuid === selectedSourceUuid); }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]!);
+function indexedFiles(sourceOnly = false): MediaFile[] {
+  const query = fileSearch.trim().toLowerCase(); const start = filterStart ? new Date(`${filterStart}T00:00:00`) : null; const end = filterEnd ? new Date(`${filterEnd}T23:59:59.999`) : null;
+  return state.catalog.files.filter((file) => (!sourceOnly || file.sourceUuid === selectedSourceUuid) && (!filterExtension || file.extension === filterExtension)
+    && (!start || new Date(file.capturedAt) >= start) && (!end || new Date(file.capturedAt) <= end) && (!query || `${file.name} ${file.relativePath}`.toLowerCase().includes(query)))
+    .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
 }
 
-function formatBytes(value: number): string {
-  if (!value) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-  return `${(value / 1024 ** index).toFixed(index > 2 ? 2 : 1)} ${units[index]}`;
+function sourceRows() {
+  if (!drives.length) return '<div class="pane-empty">未检测到外置磁盘</div>';
+  return drives.map((drive) => `<button class="source-row ${activeView === 'source' && selectedSourceUuid === drive.uuid ? 'selected' : ''}" data-source-uuid="${escapeHtml(drive.uuid)}">${svg('drive')}<span><strong>${escapeHtml(drive.name)}</strong><small>${escapeHtml(drive.kind)} · ${escapeHtml(drive.uuid.slice(0, 12))}</small></span><i></i></button>`).join('');
 }
 
-function formatDate(value?: string | null): string {
-  return value ? new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '从未运行';
-}
+function driveMonitor() { return drives.length ? `<section class="drive-monitor"><div class="monitor-title"><span>磁盘活动</span><i>实时</i></div>${drives.map((drive) => `<div class="monitor-row" data-speed-id="${escapeHtml(drive.id)}"><span class="monitor-dot"></span><strong>${escapeHtml(drive.name)}</strong><small><b class="read-speed">↓ ${formatRate(drive.readBps)}</b><b class="write-speed">↑ ${formatRate(drive.writeBps)}</b></small></div>`).join('')}</section>` : ''; }
+function updateDriveSpeeds() { for (const drive of drives) { const row = document.querySelector<HTMLElement>(`[data-speed-id="${CSS.escape(drive.id)}"]`); if (!row) continue; row.querySelector<HTMLElement>('.read-speed')!.textContent = `↓ ${formatRate(drive.readBps)}`; row.querySelector<HTMLElement>('.write-speed')!.textContent = `↑ ${formatRate(drive.writeBps)}`; } }
 
-function localDay(value: string): string {
-  const date = new Date(value);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-
-function showToast(message: string, type: 'success' | 'error' = 'success') {
-  let toast = document.querySelector<HTMLDivElement>('.toast');
-  if (!toast) { toast = document.createElement('div'); toast.className = 'toast'; document.body.appendChild(toast); }
-  toast.textContent = message; toast.dataset.type = type; toast.classList.add('visible');
-  window.clearTimeout(toastTimer); toastTimer = window.setTimeout(() => toast?.classList.remove('visible'), 3200);
-}
-
-function blankMapping(): MappingInput {
-  return { name: `映射 ${state.catalog.mappings.length + 1}`, source: selectedSource || state.catalog.source || '', destination: '', extensions: [...commonExtensions], startDate: '', endDate: '' };
-}
-
-function currentMapping(): MappingInput | null {
-  return editorBuffer || state.catalog.mappings.find((item) => item.id === selectedMappingId) || null;
-}
-
-function filteredFiles(): MediaFile[] {
-  const query = fileSearch.trim().toLowerCase();
-  const start = filterStart ? new Date(`${filterStart}T00:00:00`) : null;
-  const end = filterEnd ? new Date(`${filterEnd}T23:59:59.999`) : null;
-  return state.catalog.files.filter((file) => {
-    const date = new Date(file.capturedAt);
-    return (activeView !== 'source' || file.source === selectedSource)
-      && (!filterExtension || file.extension === filterExtension)
-      && (!start || date >= start) && (!end || date <= end)
-      && (!query || `${file.name} ${file.relativePath}`.toLowerCase().includes(query));
-  }).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
-}
-
-function sourceRows(): string {
-  const rows = drives.map((drive) => `
-    <button class="source-row ${activeView === 'source' && selectedSource === drive.path ? 'selected' : ''}" data-source="${escapeHtml(drive.path)}">
-      ${svg('drive')}<span><strong>${escapeHtml(drive.name)}</strong><small>${escapeHtml(drive.kind)}</small></span><i></i>
-    </button>`).join('');
-  return rows || '<div class="pane-empty">未检测到外置磁盘</div>';
-}
-
-function formatRate(value = 0): string {
-  return value < 1024 ? '0 KB/s' : `${formatBytes(value)}/s`;
-}
-
-function driveMonitor(): string {
-  if (!drives.length) return '';
-  return `<section class="drive-monitor"><div class="monitor-title"><span>磁盘活动</span><i>实时</i></div>${drives.map((drive) => `<div class="monitor-row" data-speed-id="${escapeHtml(drive.id)}"><span class="monitor-dot"></span><strong>${escapeHtml(drive.name)}</strong><small><b class="read-speed">↓ ${formatRate(drive.readBps)}</b><b class="write-speed">↑ ${formatRate(drive.writeBps)}</b></small></div>`).join('')}</section>`;
-}
-
-function updateDriveSpeeds() {
-  for (const drive of drives) {
-    const row = document.querySelector<HTMLElement>(`[data-speed-id="${CSS.escape(drive.id)}"]`);
-    if (!row) continue;
-    const read = row.querySelector<HTMLElement>('.read-speed'); const write = row.querySelector<HTMLElement>('.write-speed');
-    if (read) read.textContent = `↓ ${formatRate(drive.readBps)}`;
-    if (write) write.textContent = `↑ ${formatRate(drive.writeBps)}`;
-  }
-}
-
-function mappingRows(): string {
-  const mappings = state.catalog.mappings.filter((item) => `${item.name} ${item.destination}`.toLowerCase().includes(mappingSearch.toLowerCase()));
-  if (!mappings.length) return `<div class="list-empty">${mappingSearch ? '没有匹配的映射' : '还没有映射<br><small>点击“新建映射”开始</small>'}</div>`;
-  return mappings.map((mapping) => {
-    const status = mapping.lastRun ? `${mapping.lastRun.linked}/${mapping.lastRun.total} 项` : '待运行';
-    return `<button class="mapping-row ${mapping.id === selectedMappingId && !editorBuffer ? 'selected' : ''}" data-mapping="${mapping.id}">
-      <span class="mapping-symbol">${svg('map')}</span><span class="mapping-main"><strong>${escapeHtml(mapping.name)}</strong><small>${escapeHtml(mapping.source)} → ${escapeHtml(mapping.destination)}</small></span>
-      <span class="mapping-status"><strong>${status}</strong><small>${formatDate(mapping.lastRun?.at)}</small></span><span class="chevron">›</span>
-    </button>`;
-  }).join('');
-}
-
-function fileRow(file: MediaFile, compact = false): string {
-  return `<div class="media-row ${compact ? 'compact' : ''}"><span class="extension">${file.extension.slice(1).toUpperCase()}</span><span><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.relativePath)}</small></span><span>${new Date(file.capturedAt).toLocaleDateString('zh-CN')}</span><b>${formatBytes(file.size)}</b></div>`;
-}
+function extensionClass(extension: string) { const video = ['.mov', '.mp4', '.mxf', '.avi', '.mkv', '.r3d', '.braw']; const audio = ['.wav', '.mp3', '.aac', '.flac']; const raw = ['.dng', '.cr2', '.cr3', '.nef', '.arw']; const image = ['.jpg', '.jpeg', '.png', '.tif', '.tiff']; return video.includes(extension) ? 'video' : audio.includes(extension) ? 'audio' : raw.includes(extension) ? 'raw' : image.includes(extension) ? 'image' : 'other'; }
+function fileRow(file: MediaFile, checkbox = false) { return `<div class="media-row interactive" data-file-path="${escapeHtml(file.path)}">${checkbox ? `<input class="copy-file-check" data-copy-id="${file.id}" type="checkbox" ${copySelected.has(file.id) ? 'checked' : ''}>` : ''}<span class="extension ${extensionClass(file.extension)}">${file.extension.slice(1).toUpperCase()}</span><span><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(file.relativePath)}</small></span><span>${new Date(file.capturedAt).toLocaleDateString('zh-CN')}</span><b>${formatBytes(file.size)}</b></div>`; }
 
 type TreeNode = { directories: Map<string, TreeNode>; files: MediaFile[] };
-function buildTree(files: MediaFile[]): TreeNode {
-  const rootNode: TreeNode = { directories: new Map(), files: [] };
-  for (const file of files) {
-    const parts = file.relativePath.split(/[\\/]/); parts.pop();
-    let node = rootNode;
-    for (const part of parts) {
-      if (!node.directories.has(part)) node.directories.set(part, { directories: new Map(), files: [] });
-      node = node.directories.get(part)!;
-    }
-    node.files.push(file);
-  }
-  return rootNode;
-}
+function buildTree(files: MediaFile[]) { const tree: TreeNode = { directories: new Map(), files: [] }; for (const file of files) { const parts = file.relativePath.split(/[\\/]/); parts.pop(); let node = tree; for (const part of parts) { if (!node.directories.has(part)) node.directories.set(part, { directories: new Map(), files: [] }); node = node.directories.get(part)!; } node.files.push(file); } return tree; }
+function treeCount(node: TreeNode): number { return node.files.length + [...node.directories.values()].reduce((sum, child) => sum + treeCount(child), 0); }
+function renderTree(node: TreeNode, depth = 0): string { return [...node.directories.entries()].map(([name, child]) => `<details class="tree-directory" ${depth < 1 ? 'open' : ''}><summary style="--depth:${depth}">${svg('folder')}<strong>${escapeHtml(name)}</strong><span>${treeCount(child)}</span></summary>${renderTree(child, depth + 1)}</details>`).join('') + node.files.map((file) => `<div class="tree-file" style="--depth:${depth}">${fileRow(file)}</div>`).join(''); }
 
-function treeCount(node: TreeNode): number {
-  return node.files.length + [...node.directories.values()].reduce((sum, child) => sum + treeCount(child), 0);
-}
+function mediaExplorer() { const files = indexedFiles(); if (!files.length) return '<div class="list-empty">当前没有在线素材<br><small>插入素材盘并确认扫描后会自动显示</small></div>'; if (mediaMode === 'tree') return `<div class="tree-view">${renderTree(buildTree(files))}</div>`; return `<div class="table-head"><span>文件</span><span>日期</span><span>大小</span></div><div class="content-list">${files.slice(0, 2000).map((file) => fileRow(file)).join('')}</div>`; }
 
-function renderTree(node: TreeNode, depth = 0): string {
-  const directories = [...node.directories.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh-CN')).map(([name, child]) => `
-    <details class="tree-directory" ${depth < 1 ? 'open' : ''}><summary style="--depth:${depth}">${svg('folder')}<strong>${escapeHtml(name)}</strong><span>${treeCount(child)}</span></summary>
-      ${renderTree(child, depth + 1)}
-    </details>`).join('');
-  const files = node.files.map((file) => `<div class="tree-file" style="--depth:${depth}">${fileRow(file, true)}</div>`).join('');
-  return directories + files;
-}
+async function loadRaw(relative = '') { const drive = currentDrive(); if (!drive) return; rawBusy = true; rawPath = relative; render(); try { rawEntries = await window.materialGater.listDirectory(drive.path, relative); } catch (error) { rawEntries = []; showToast(String(error), 'error'); } rawBusy = false; render(); }
+function rawExplorer() { const drive = currentDrive(); if (!drive) return '<div class="list-empty">素材源已离线</div>'; const parent = rawPath.split(/[\\/]/).slice(0, -1).join('/'); return `<div class="raw-browser"><div class="raw-path"><button id="raw-back" ${!rawPath ? 'disabled' : ''}>${svg('back')}</button><span>${escapeHtml(drive.path)}${rawPath ? ` / ${escapeHtml(rawPath)}` : ''}</span><button id="raw-scan">扫描到素材库</button></div>${rawBusy ? '<div class="list-empty">读取目录…</div>' : `<div class="raw-head"><span>名称</span><span>修改时间</span><span>大小</span></div>${rawEntries.map((entry) => `<div class="raw-row" data-raw-path="${escapeHtml(entry.path)}" data-raw-relative="${escapeHtml(entry.relativePath)}" data-directory="${entry.directory}">${entry.directory ? `<span class="raw-icon folder">${svg('folder')}</span>` : `<span class="extension ${extensionClass(entry.extension)}">${escapeHtml(entry.extension.slice(1).toUpperCase() || 'FILE')}</span>`}<strong>${escapeHtml(entry.name)}</strong><span>${new Date(entry.modifiedAt).toLocaleString('zh-CN')}</span><b>${entry.directory ? '—' : formatBytes(entry.size)}</b></div>`).join('') || '<div class="list-empty">空目录</div>'}`}</div><span hidden data-parent="${escapeHtml(parent)}"></span>`; }
 
-function mediaExplorer(): string {
-  const files = filteredFiles();
-  if (!files.length) return '<div class="list-empty">没有符合条件的素材<br><small>可以调整过滤器或重新扫描素材源</small></div>';
-  if (mediaMode === 'tree') return `<div class="tree-view">${renderTree(buildTree(files))}</div>`;
-  return `<div class="table-head"><span>文件</span><span>日期</span><span>大小</span></div><div class="content-list">${files.slice(0, 1000).map((file) => fileRow(file)).join('')}</div>`;
-}
+function mappingRows() { if (!state.catalog.mappings.length) return '<div class="list-empty">还没有映射<br><small>创建后会随素材盘自动挂载与卸载</small></div>'; return state.catalog.mappings.map((mapping) => `<button class="mapping-row ${mapping.id === selectedMappingId ? 'selected' : ''}" data-mapping="${mapping.id}"><span class="mapping-symbol">${svg('map')}</span><span class="mapping-main"><strong>${escapeHtml(mapping.name)}</strong><small>${escapeHtml(mapping.source)} → ${escapeHtml(mapping.destination)}</small></span><span class="mapping-status"><strong>${mapping.mounted ? '已挂载' : '已卸载'}</strong><small>${formatDate(mapping.lastRun?.at)}</small></span><span class="chevron">›</span></button>`).join(''); }
+function blankMapping(): MappingInput { const drive = currentDrive() || drives[0]; return { name: `映射 ${state.catalog.mappings.length + 1}`, source: drive?.path || '', sourceUuid: drive?.uuid || '', destination: '', extensions: [...commonExtensions], startDate: '', endDate: '' }; }
+function currentMapping() { return editorBuffer || state.catalog.mappings.find((item) => item.id === selectedMappingId) || null; }
+function mappingEditor() { const mapping = currentMapping(); if (!mapping) return `<section class="detail-placeholder">${svg('map')}<h2>选择一个映射</h2><p>映射会绑定硬盘 UUID，拔盘自动卸载，重插自动恢复。</p><button class="button primary" id="new-mapping">${svg('plus')}新建映射</button></section>`; const saved = mapping.id ? state.catalog.mappings.find((item) => item.id === mapping.id) : null; const sourceCount = state.catalog.files.filter((file) => file.sourceUuid === mapping.sourceUuid).length; return `<section class="editor"><div class="editor-title"><div><span>${saved ? 'UUID 映射' : '新建映射'}</span><h2>${escapeHtml(mapping.name)}</h2></div>${saved ? `<span class="mount-pill ${saved.mounted ? 'online' : ''}">${saved.mounted ? '已挂载' : '等待素材源'}</span>` : ''}</div><label class="field"><span>名称</span><input id="mapping-name" value="${escapeHtml(mapping.name)}"></label><div class="mapping-flow"><label class="flow-step"><span><i>1</i>素材来源</span><select id="mapping-source">${drives.map((drive) => `<option value="${drive.uuid}" ${drive.uuid === mapping.sourceUuid ? 'selected' : ''}>${escapeHtml(drive.name)} · ${escapeHtml(drive.uuid)}</option>`).join('')}</select><small>${sourceCount} 个已索引素材，绑定 UUID 后不受盘符变化影响</small></label><div class="flow-arrow">↓</div><label class="flow-step"><span><i>2</i>链接输出位置</span><div class="path-input"><input id="mapping-destination" readonly value="${escapeHtml(mapping.destination)}"><button id="pick-destination">选择位置</button></div></label></div><div class="field"><span>文件类型</span><div class="extensions">${[...new Set([...commonExtensions, ...mapping.extensions])].map((ext) => `<label><input type="checkbox" value="${ext}" ${mapping.extensions.includes(ext) ? 'checked' : ''}><span>${ext.slice(1).toUpperCase()}</span></label>`).join('')}</div></div><div class="date-grid"><label class="field"><span>开始日期</span><input id="mapping-start" type="date" value="${mapping.startDate}"></label><label class="field"><span>结束日期</span><input id="mapping-end" type="date" value="${mapping.endDate}"></label></div><div class="editor-actions">${saved ? '<button class="button danger-outline" id="delete-mapping">删除映射…</button>' : '<span></span>'}<div><button class="button" id="save-mapping">保存</button><button class="button primary" id="run-mapping">${svg('play')}保存并挂载</button></div></div>${deleteConfirmOpen && saved ? `<div class="delete-panel"><strong>删除“${escapeHtml(saved.name)}”</strong><p>可同时清理该映射管理的链接。</p><div><button class="button" id="cancel-delete">取消</button><button class="button danger-outline" id="delete-config-only">仅配置</button><button class="button danger-solid" id="delete-with-links">配置与链接</button></div></div>` : ''}</section>`; }
 
-function summarizeFiles(files: MediaFile[]) {
-  const byDay: Record<string, { count: number; size: number }> = {};
-  const byType: Record<string, { count: number; size: number }> = {};
-  let size = 0;
-  for (const file of files) {
-    const day = localDay(file.capturedAt); size += file.size;
-    byDay[day] ||= { count: 0, size: 0 }; byDay[day].count += 1; byDay[day].size += file.size;
-    byType[file.extension] ||= { count: 0, size: 0 }; byType[file.extension].count += 1; byType[file.extension].size += file.size;
-  }
-  return { count: files.length, size, byDay, byType };
-}
+function statisticsDashboard() { const files = indexedFiles(); const byDay: Record<string, { count: number; size: number }> = {}; const byType: Record<string, { count: number; size: number }> = {}; let size = 0; for (const file of files) { const day = localDay(file.capturedAt); size += file.size; byDay[day] ||= { count: 0, size: 0 }; byDay[day].count++; byDay[day].size += file.size; byType[file.extension] ||= { count: 0, size: 0 }; byType[file.extension].count++; byType[file.extension].size += file.size; } const days = Object.entries(byDay).sort().slice(-14); const max = Math.max(1, ...days.map(([, value]) => value.size)); const types = Object.entries(byType).sort(([, a], [, b]) => b.size - a.size); let cursor = 0; const stops = types.map(([, item], i) => { const start = cursor; cursor += size ? item.size / size * 100 : 0; return `${chartColors[i % chartColors.length]} ${start}% ${cursor}%`; }).join(','); return `<div class="stats-dashboard"><section class="stat-cards"><article><span>在线素材</span><strong>${files.length}</strong><small>个文件</small></article><article><span>总容量</span><strong>${formatBytes(size)}</strong></article><article><span>拍摄日期</span><strong>${days.length}</strong><small>天</small></article><article><span>在线素材源</span><strong>${drives.length}</strong><small>个</small></article></section><section class="charts-grid"><article class="chart-card"><div class="chart-title"><h2>每日拍摄容量</h2></div><div class="bar-chart">${days.map(([day, item]) => `<div class="bar-column"><b>${formatBytes(item.size)}</b><div><span style="height:${Math.max(4, item.size / max * 100)}%"></span></div><small>${day.slice(5)}</small></div>`).join('')}</div></article><article class="chart-card"><div class="chart-title"><h2>文件类型占比</h2></div><div class="pie-layout"><div class="pie" style="background:conic-gradient(${stops})"><span><strong>${types.length}</strong><small>种类型</small></span></div><div class="legend">${types.slice(0, 8).map(([ext, item], i) => `<div><i style="background:${chartColors[i % chartColors.length]}"></i><strong>${ext.slice(1).toUpperCase()}</strong><span>${size ? (item.size / size * 100).toFixed(1) : 0}%</span><small>${formatBytes(item.size)}</small></div>`).join('')}</div></div></article></section></div>`; }
 
-function statisticsDashboard(): string {
-  const files = filteredFiles();
-  const stats = summarizeFiles(files);
-  const days = Object.entries(stats.byDay).sort(([a], [b]) => a.localeCompare(b)).slice(-14);
-  const maxDaySize = Math.max(1, ...days.map(([, item]) => item.size));
-  const types = Object.entries(stats.byType).sort(([, a], [, b]) => b.size - a.size);
-  let cursor = 0;
-  const stops = types.map(([, item], index) => { const start = cursor; cursor += stats.size ? item.size / stats.size * 100 : 0; return `${chartColors[index % chartColors.length]} ${start}% ${cursor}%`; }).join(', ');
-  return `<div class="stats-dashboard">
-    <section class="stat-cards"><article><span>筛选后素材</span><strong>${stats.count.toLocaleString()}</strong><small>个文件</small></article><article><span>总容量</span><strong>${formatBytes(stats.size)}</strong></article><article><span>拍摄日期</span><strong>${Object.keys(stats.byDay).length}</strong><small>天</small></article><article><span>文件类型</span><strong>${Object.keys(stats.byType).length}</strong><small>种</small></article></section>
-    <section class="charts-grid">
-      <article class="chart-card"><div class="chart-title"><div><h2>每日拍摄容量</h2><span>最近 ${days.length} 个拍摄日</span></div></div>
-        ${days.length ? `<div class="bar-chart">${days.map(([day, item]) => `<div class="bar-column" title="${day} · ${formatBytes(item.size)}"><b>${formatBytes(item.size)}</b><div><span style="height:${Math.max(4, item.size / maxDaySize * 100)}%"></span></div><small>${day.slice(5)}</small></div>`).join('')}</div>` : '<div class="chart-empty">暂无数据</div>'}
-      </article>
-      <article class="chart-card"><div class="chart-title"><div><h2>文件类型占比</h2><span>按容量统计</span></div></div>
-        ${types.length ? `<div class="pie-layout"><div class="pie" style="background:conic-gradient(${stops})"><span><strong>${types.length}</strong><small>种类型</small></span></div><div class="legend">${types.slice(0, 8).map(([ext, item], index) => `<div><i style="background:${chartColors[index % chartColors.length]}"></i><strong>${ext.slice(1).toUpperCase()}</strong><span>${(item.size / stats.size * 100).toFixed(1)}%</span><small>${formatBytes(item.size)}</small></div>`).join('')}</div></div>` : '<div class="chart-empty">暂无数据</div>'}
-      </article>
-    </section>
-    <section class="stats-table"><div class="section-title"><h2>日期明细</h2></div><div class="table-head activity"><span>拍摄日期</span><span>数量</span><span>容量</span></div>${Object.entries(stats.byDay).sort(([a], [b]) => b.localeCompare(a)).map(([day, item]) => `<div class="activity-row"><span>${day}</span><strong>${item.count} 个文件</strong><b>${formatBytes(item.size)}</b></div>`).join('')}</section>
-  </div>`;
-}
+function copyCandidates() { const source = copySourceUuid || drives[0]?.uuid || ''; const ids = new Set(copySelected); return state.catalog.files.filter((file) => file.sourceUuid === source && (!copyExtensions.length || copyExtensions.includes(file.extension)) && (!copyStart || localDay(file.capturedAt) >= copyStart) && (!copyEnd || localDay(file.capturedAt) <= copyEnd)).map((file) => ({ file, checked: ids.has(file.id) })); }
+function copyGroups() { const groups = new Map<string, MediaFile[]>(); for (const { file } of copyCandidates()) { const date = new Date(file.capturedAt); const key = `${localDay(file.capturedAt)} ${String(date.getHours()).padStart(2, '0')}:00`; if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(file); } return groups; }
+function copyWorkspace() { const candidates = copyCandidates(); const groups = copyGroups(); const selectedFiles = candidates.filter(({ checked }) => checked).map(({ file }) => file); const selectedBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0); const tasks = state.catalog.tasks; return `<div class="copy-page"><section class="copy-builder"><div class="copy-step"><span>1</span><div><h2>选择素材</h2><p>按日期与小时分组，支持逐项或整组选取</p></div></div><div class="copy-controls"><select id="copy-source">${drives.map((drive) => `<option value="${drive.uuid}" ${drive.uuid === copySourceUuid ? 'selected' : ''}>${escapeHtml(drive.name)}</option>`).join('')}</select><select id="copy-preset"><option value="">使用预设…</option>${state.catalog.presets.map((preset) => `<option value="${preset.id}">${escapeHtml(preset.name)}</option>`).join('')}</select><input id="copy-start" type="date" value="${copyStart}"><input id="copy-end" type="date" value="${copyEnd}"></div><div class="copy-quick"><button id="copy-today">今天</button><button data-quick-ext=".dng">所有 DNG</button><button data-quick-ext=".mov">所有 MOV</button><button id="copy-clear-rule">清除规则</button></div><div class="copy-types">${[...new Set(state.catalog.files.map((file) => file.extension))].sort().map((ext) => `<label><input type="checkbox" data-copy-ext="${ext}" ${copyExtensions.includes(ext) ? 'checked' : ''}><span class="${extensionClass(ext)}">${ext.slice(1).toUpperCase()}</span></label>`).join('')}</div><div class="copy-files">${[...groups.entries()].map(([group, files]) => { const checked = files.every((file) => copySelected.has(file.id)); return `<details open class="copy-group"><summary><input class="copy-group-check" data-copy-group="${escapeHtml(group)}" type="checkbox" ${checked ? 'checked' : ''}><strong>${escapeHtml(group)}</strong><span>${files.length} 个 · ${formatBytes(files.reduce((sum, file) => sum + file.size, 0))}</span></summary>${files.map((file) => fileRow(file, true)).join('')}</details>`; }).join('') || '<div class="list-empty">当前素材源没有符合条件的文件</div>'}</div><div class="selection-summary"><strong>已选 ${selectedFiles.length} 个文件</strong><span>${formatBytes(selectedBytes)}</span></div><div class="copy-step second"><span>2</span><div><h2>选择储存库与目录规则</h2><p>默认按 日期 / 备注 创建目录</p></div></div><div class="repository-picker">${state.catalog.repositories.map((repo) => `<button data-copy-repository="${repo.id}" class="${copyRepositoryId === repo.id ? 'selected' : ''}">${svg('storage')}<strong>${escapeHtml(repo.name)}</strong><small>${repo.type.toUpperCase()}</small></button>`).join('') || '<button id="go-repositories" class="empty">＋ 添加储存库</button>'}</div><div class="copy-path-grid"><label class="field"><span>备注</span><input id="copy-note" value="${escapeHtml(copyNote)}" placeholder="例如：悟3"></label><label class="field"><span>目录模板</span><input id="copy-template" value="${escapeHtml(copyTemplate)}" placeholder="%day/%note"></label></div><div class="copy-options"><label><input type="radio" name="copy-mode" value="flat" ${copyMode === 'flat' ? 'checked' : ''}>统一拷贝到一级目录</label><label><input type="radio" name="copy-mode" value="original" ${copyMode === 'original' ? 'checked' : ''}>保留原始相对路径</label><span>变量：%day · %time · %note · %note("固定文字")</span></div><div class="copy-actions"><button class="button" id="save-copy-preset">保存为预设</button><button class="button primary" id="start-copy" ${!selectedFiles.length || !copyRepositoryId ? 'disabled' : ''}>${svg('copy')}开始后台拷贝</button></div></section><aside class="task-panel"><div class="section-heading"><div><h2>后台任务</h2><span>${tasks.filter((task) => task.status === 'running').length} 个运行中</span></div></div>${tasks.map((task) => taskCard(task)).join('') || '<div class="list-empty">暂无拷贝任务</div>'}</aside></div>`; }
+function taskCard(task: AppState['catalog']['tasks'][number]) { const progress = task.totalBytes ? Math.min(100, task.copiedBytes / task.totalBytes * 100) : 0; const max = Math.max(1, ...task.history); return `<article class="task-card"><div class="task-title"><div><strong>${escapeHtml(task.name)}</strong><small>${task.files.filter((file) => file.status === 'completed').length}/${task.files.length} 个文件</small></div><span class="task-status ${task.status}">${({ running: '拷贝中', paused: '已暂停', completed: '已完成', failed: '失败', queued: '等待中' } as Record<string, string>)[task.status]}</span></div><div class="speed-graph">${task.history.slice(-48).map((value) => `<i style="height:${Math.max(4, value / max * 100)}%"></i>`).join('')}</div><div class="progress"><i style="width:${progress}%"></i></div><div class="task-meta"><strong>${progress.toFixed(1)}%</strong><span>${formatBytes(task.copiedBytes)} / ${formatBytes(task.totalBytes)}</span><span>${formatRate(task.speed)}</span><span>ETA ${task.eta == null ? '—' : `${Math.floor(task.eta / 60)}:${String(task.eta % 60).padStart(2, '0')}`}</span></div>${task.error ? `<p class="task-error">${escapeHtml(task.error)}</p>` : ''}${task.status === 'running' ? `<button class="task-action" data-pause-task="${task.id}">${svg('pause')}暂停</button>` : task.status === 'paused' || task.status === 'failed' ? `<button class="task-action" data-resume-task="${task.id}">${svg('play')}继续</button>` : ''}</article>`; }
 
-function editor(): string {
-  const mapping = currentMapping();
-  if (!mapping) return `<section class="detail-placeholder">${svg('map')}<h2>选择一个映射</h2><p>在中间列表选择映射，或创建一个新的素材映射。</p><button class="button primary" id="empty-new">${svg('plus')}新建映射</button></section>`;
-  const saved = mapping.id ? state.catalog.mappings.find((item) => item.id === mapping.id) : null;
-  const available = [...new Set([...commonExtensions, ...Object.keys(state.stats.byType), ...mapping.extensions])].sort();
-  const sourceCount = state.catalog.files.filter((file) => file.source === mapping.source).length;
-  return `<section class="editor"><div class="editor-title"><div><span>${mapping.id ? '映射详情' : '新建映射'}</span><h2>${escapeHtml(mapping.name || '未命名映射')}</h2></div></div>
-    ${saved?.lastRun ? `<div class="run-summary"><span class="status-dot ${saved.lastRun.failed ? 'warning' : ''}"></span><div><strong>上次运行 ${formatDate(saved.lastRun.at)}</strong><small>${saved.lastRun.linked} 个链接成功${saved.lastRun.failed ? `，${saved.lastRun.failed} 个失败` : ''}</small></div></div>` : ''}
-    <label class="field"><span>名称</span><input id="mapping-name" value="${escapeHtml(mapping.name)}" placeholder="例如：今日 MOV 素材"></label>
-    <div class="mapping-flow">
-      <label class="flow-step"><span><i>1</i>素材来源</span><div class="path-input"><input id="mapping-source" readonly value="${escapeHtml(mapping.source)}" placeholder="选择硬盘或素材文件夹"><button id="pick-mapping-source">选择来源</button></div><small>${sourceCount ? `已索引 ${sourceCount} 个素材` : '选择后请在左侧扫描该来源'}</small></label>
-      <div class="flow-arrow">↓</div>
-      <label class="flow-step"><span><i>2</i>输出位置</span><div class="path-input"><input id="mapping-destination" readonly value="${escapeHtml(mapping.destination)}" placeholder="选择生成链接的目录"><button id="pick-destination">选择位置</button></div><small>剪辑软件将从这里读取链接素材</small></label>
-    </div>
-    <div class="field"><span>文件类型</span><div class="extensions">${available.map((ext) => `<label><input type="checkbox" value="${ext}" ${mapping.extensions.includes(ext) ? 'checked' : ''}><span>${ext.slice(1).toUpperCase()}</span></label>`).join('')}</div></div>
-    <div class="date-grid"><label class="field"><span>开始日期</span><input id="mapping-start" type="date" value="${mapping.startDate}"></label><label class="field"><span>结束日期</span><input id="mapping-end" type="date" value="${mapping.endDate}"></label></div>
-    <p class="note">留空日期表示全部素材。源文件不会被复制或修改。</p>
-    <div class="editor-actions">${saved ? '<button class="button danger-outline" id="delete-mapping">删除映射…</button>' : '<span></span>'}<div><button class="button" id="save-mapping" ${busyAction ? 'disabled' : ''}>${busyAction === 'save' ? '保存中…' : '保存'}</button><button class="button primary" id="run-mapping" ${!sourceCount || busyAction ? 'disabled' : ''}>${svg('play')}${busyAction === 'run' ? '运行中…' : '保存并运行'}</button></div></div>
-    ${deleteConfirmOpen && saved ? `<div class="delete-panel"><strong>删除“${escapeHtml(saved.name)}”</strong><p>你可以只删除配置，或同时清理该映射清单中记录的链接。输出目录里的其他文件不会被删除。</p><div><button class="button" id="cancel-delete">取消</button><button class="button danger-outline" id="delete-config-only">仅删除配置</button><button class="button danger-solid" id="delete-with-links">删除配置与链接</button></div></div>` : ''}
-  </section>`;
-}
+function repositoryWorkspace() { const current = repositoryDraft || state.catalog.repositories.find((item) => item.id === selectedRepositoryId); return `<div class="repository-page"><section class="repository-list"><div class="section-heading"><div><h2>储存库</h2><span>${state.catalog.repositories.length} 个位置</span></div><button id="new-repository">${svg('plus')}</button></div>${state.catalog.repositories.map((repo) => `<button class="repository-row ${repo.id === selectedRepositoryId && !repositoryDraft ? 'selected' : ''}" data-repository="${repo.id}">${svg('storage')}<span><strong>${escapeHtml(repo.name)}</strong><small>${repo.type.toUpperCase()} · ${escapeHtml(repo.root || repo.address)}</small></span></button>`).join('')}</section><aside class="repository-editor">${current ? repositoryForm(current) : `<div class="detail-placeholder">${svg('storage')}<h2>添加储存库</h2><p>支持本地、USB、SMB、FTP 与 SFTP 配置。</p><button class="button primary" id="empty-repository">${svg('plus')}添加储存库</button></div>`}</aside></div>`; }
+function repositoryForm(repo: Partial<Repository>) { const type = repo.type || 'local'; const localLike = ['local', 'usb', 'smb'].includes(type); const remote = ['smb', 'ftp', 'sftp'].includes(type); return `<section class="editor"><div class="editor-title"><div><span>储存库配置</span><h2>${escapeHtml(repo.name || '新储存库')}</h2></div></div><label class="field"><span>名称</span><input id="repo-name" value="${escapeHtml(repo.name || '')}"></label><label class="field"><span>类型</span><select id="repo-type">${(['local', 'usb', 'smb', 'ftp', 'sftp'] as RepositoryType[]).map((item) => `<option value="${item}" ${type === item ? 'selected' : ''}>${item.toUpperCase()}</option>`).join('')}</select></label>${localLike ? `<label class="field"><span>${type === 'smb' ? 'SMB 挂载目录（可选）' : '储存目录'}</span><div class="path-input"><input id="repo-root" readonly value="${escapeHtml(repo.root || '')}"><button id="pick-repo-root">选择目录</button></div></label>` : ''}${remote ? `<label class="field"><span>远程地址</span><input id="repo-address" value="${escapeHtml(repo.address || '')}" placeholder="server.example.com"></label><div class="date-grid"><label class="field"><span>端口</span><input id="repo-port" type="number" value="${repo.port || (type === 'sftp' ? 22 : type === 'ftp' ? 21 : 445)}"></label><label class="field"><span>远程目录</span><input id="repo-remote-path" value="${escapeHtml(repo.remotePath || '')}" placeholder="/media"></label></div><div class="date-grid"><label class="field"><span>用户名</span><input id="repo-username" value="${escapeHtml(repo.username || '')}"></label><label class="field"><span>域名称</span><input id="repo-domain" value="${escapeHtml(repo.domain || '')}"></label></div><label class="field"><span>密码${repo.hasPassword ? '（已安全保存，留空保持不变）' : ''}</span><input id="repo-password" type="password" autocomplete="new-password"></label><p class="note">密码使用系统安全存储加密，不写入普通配置文件。SMB 可直连，也可使用系统已挂载目录。</p>` : ''}<div class="editor-actions">${repo.id ? '<button class="button danger-outline" id="delete-repository">删除</button>' : '<span></span>'}<div><button class="button" id="test-repository">测试连接</button><button class="button primary" id="save-repository">保存储存库</button></div></div></section>`; }
 
-function filterControls(): string {
-  const extensions = [...new Set(state.catalog.files.map((file) => file.extension))].sort();
-  const search = activeView !== 'activity' ? `<label class="search">${svg('search')}<input id="file-search" value="${escapeHtml(fileSearch)}" placeholder="搜索文件"></label>` : '';
-  const modes = activeView !== 'activity' ? `<div class="view-switch"><button data-mode="list" class="${mediaMode === 'list' ? 'active' : ''}" title="列表">${svg('list')}</button><button data-mode="tree" class="${mediaMode === 'tree' ? 'active' : ''}" title="树形列表">${svg('tree')}</button></div>` : '';
-  return `${search}<select id="filter-extension"><option value="">全部类型</option>${extensions.map((ext) => `<option value="${ext}" ${filterExtension === ext ? 'selected' : ''}>${ext.slice(1).toUpperCase()}</option>`).join('')}</select><label class="date-filter">从 <input id="filter-start" type="date" value="${filterStart}"></label><label class="date-filter">至 <input id="filter-end" type="date" value="${filterEnd}"></label>${(fileSearch || filterExtension || filterStart || filterEnd) ? '<button class="clear-filter" id="clear-filter">清除</button>' : ''}${modes}`;
-}
+function settingsWorkspace() { const settings = state.catalog.settings; return `<div class="settings-page"><section><div class="settings-title">${svg('settings')}<div><h2>检测与后台</h2><p>控制前台、后台轮询和通知行为</p></div></div><div class="settings-row"><div><strong>前台扫描频率</strong><small>主界面处于活动状态时</small></div><select id="foreground-frequency">${[500, 1000, 2000, 5000].map((ms) => `<option value="${ms}" ${settings.foregroundScanMs === ms ? 'selected' : ''}>${ms / 1000} 秒</option>`).join('')}</select></div><div class="settings-row"><div><strong>后台扫描频率</strong><small>窗口关闭或不在前台时</small></div><select id="background-frequency">${[1000, 3000, 5000, 10000].map((ms) => `<option value="${ms}" ${settings.backgroundScanMs === ms ? 'selected' : ''}>${ms / 1000} 秒</option>`).join('')}</select></div><label class="settings-toggle"><div><strong>检测后询问是否扫描</strong><small>避免插盘后未经确认读取全部目录</small></div><input id="ask-scan" type="checkbox" ${settings.askBeforeScan ? 'checked' : ''}><i></i></label><label class="settings-toggle"><div><strong>系统通知</strong><small>后台检测到插拔、卸载和任务状态时提示</small></div><input id="notifications" type="checkbox" ${settings.notifications ? 'checked' : ''}><i></i></label><label class="settings-toggle"><div><strong>关闭窗口后继续运行</strong><small>保持磁盘检测与拷贝守护进程</small></div><input id="keep-running" type="checkbox" ${settings.keepRunning ? 'checked' : ''}><i></i></label><div class="settings-actions"><button class="button primary" id="save-settings">保存设置</button></div></section><section><div class="settings-title">${svg('storage')}<div><h2>本地数据</h2><p>索引、任务断点和加密凭据位置</p></div></div><button class="data-card" id="open-data"><strong>${escapeHtml(state.dataDirectory)}</strong><span>在文件管理器中打开</span></button></section></div>`; }
 
-function centerContent(): string {
-  if (activeView === 'media' || activeView === 'source') return mediaExplorer();
-  if (activeView === 'activity') return statisticsDashboard();
-  return `<div class="mapping-list">${mappingRows()}</div>`;
-}
+function filterControls() { if (!['media', 'activity'].includes(activeView)) return ''; const extensions = [...new Set(state.catalog.files.map((file) => file.extension))].sort(); return `${activeView === 'media' ? `<label class="search">${svg('search')}<input id="file-search" value="${escapeHtml(fileSearch)}" placeholder="搜索文件"></label>` : ''}<select id="filter-extension"><option value="">全部类型</option>${extensions.map((ext) => `<option value="${ext}" ${filterExtension === ext ? 'selected' : ''}>${ext.slice(1).toUpperCase()}</option>`).join('')}</select><label class="date-filter">从 <input id="filter-start" type="date" value="${filterStart}"></label><label class="date-filter">至 <input id="filter-end" type="date" value="${filterEnd}"></label>${activeView === 'media' ? `<div class="view-switch"><button data-mode="list" class="${mediaMode === 'list' ? 'active' : ''}">${svg('list')}</button><button data-mode="tree" class="${mediaMode === 'tree' ? 'active' : ''}">${svg('tree')}</button></div>` : ''}`; }
+function viewTitle() { const labels: Record<View, string> = { mappings: '映射', media: '素材库', activity: '统计', copy: '拷贝', repositories: '储存库', settings: '设置', source: currentDrive()?.name || '素材源' }; const subtitles: Record<View, string> = { mappings: `${state.catalog.mappings.length} 个配置`, media: `${state.stats.count} 个在线文件 · ${formatBytes(state.stats.size)}`, activity: '素材容量与类型分析', copy: '选择素材并创建可恢复后台任务', repositories: `${state.catalog.repositories.length} 个储存位置`, settings: '后台、检测与通知', source: '原始目录 · 未经筛选' }; return { title: labels[activeView], subtitle: subtitles[activeView] }; }
 
-function viewTitle(): { title: string; subtitle: string } {
-  if (activeView === 'mappings') return { title: '映射', subtitle: `${state.catalog.mappings.length} 个配置` };
-  if (activeView === 'activity') { const stats = summarizeFiles(filteredFiles()); return { title: '统计', subtitle: `${stats.count} 个文件 · ${formatBytes(stats.size)}` }; }
-  const files = filteredFiles();
-  if (activeView === 'source') { const drive = drives.find((item) => item.path === selectedSource); return { title: drive?.name || '素材源预览', subtitle: `${files.length} 个文件 · ${formatBytes(files.reduce((sum, file) => sum + file.size, 0))}` }; }
-  return { title: '素材', subtitle: `${files.length} 个文件 · ${formatBytes(files.reduce((sum, file) => sum + file.size, 0))}` };
-}
+function mainContent() { if (activeView === 'mappings') return `<div class="work-area"><section class="list-pane">${mappingRows()}</section><aside class="detail-pane">${mappingEditor()}</aside></div>`; if (activeView === 'source') return `<div class="single-pane">${rawExplorer()}</div>`; if (activeView === 'media') return `<div class="single-pane">${mediaExplorer()}</div>`; if (activeView === 'activity') return `<div class="single-pane">${statisticsDashboard()}</div>`; if (activeView === 'copy') return `<div class="single-pane">${copyWorkspace()}</div>`; if (activeView === 'repositories') return `<div class="single-pane">${repositoryWorkspace()}</div>`; return `<div class="single-pane">${settingsWorkspace()}</div>`; }
 
-function render() {
-  const heading = viewTitle();
-  root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="brand"><span>MG</span><strong>Material Gater</strong></div><nav>
-      <button class="${activeView === 'mappings' ? 'active' : ''}" data-view="mappings">${svg('map')}映射<span>${state.catalog.mappings.length}</span></button>
-      <button class="${activeView === 'media' ? 'active' : ''}" data-view="media">${svg('media')}素材<span>${state.stats.count}</span></button>
-      <button class="${activeView === 'activity' ? 'active' : ''}" data-view="activity">${svg('chart')}统计</button></nav>
-      <div class="sidebar-heading"><span>素材源</span><button id="choose-source" title="选择目录">${svg('plus')}</button></div><div class="source-list">${sourceRows()}</div>
-      ${selectedSource ? `<div class="scan-box"><span title="${escapeHtml(selectedSource)}">${escapeHtml(selectedSource)}</span><button id="scan-source" ${busyAction ? 'disabled' : ''}>${busyAction === 'scan' ? '扫描中…' : '重新扫描'}</button></div>` : ''}
-      <div class="sidebar-bottom">${driveMonitor()}<button class="data-location" id="open-data">${svg('folder')}<span>本地数据库<small>${escapeHtml(state.dataDirectory)}</small></span></button></div></aside>
-    <main class="workspace"><header class="toolbar"><div class="toolbar-heading"><h1>${escapeHtml(heading.title)}</h1><span>${heading.subtitle}</span></div><div class="toolbar-actions">${activeView === 'mappings' ? `<label class="search">${svg('search')}<input id="mapping-search" value="${escapeHtml(mappingSearch)}" placeholder="搜索映射"></label><button class="button primary" id="new-mapping">${svg('plus')}新建映射</button>` : filterControls()}</div></header>
-      <div class="work-area ${activeView !== 'mappings' ? 'single' : ''}"><section class="list-pane">${centerContent()}</section>${activeView === 'mappings' ? `<aside class="detail-pane">${editor()}</aside>` : ''}</div></main></div>`;
-  bindEvents();
-}
+function render() { const heading = viewTitle(); root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="brand"><strong>Material Gater</strong></div><nav><button data-view="mappings" class="${activeView === 'mappings' ? 'active' : ''}">${svg('map')}映射<span>${state.catalog.mappings.length}</span></button><button data-view="media" class="${activeView === 'media' ? 'active' : ''}">${svg('media')}素材<span>${state.stats.count}</span></button><button data-view="copy" class="${activeView === 'copy' ? 'active' : ''}">${svg('copy')}拷贝<span>${state.catalog.tasks.filter((task) => task.status === 'running').length || ''}</span></button><button data-view="repositories" class="${activeView === 'repositories' ? 'active' : ''}">${svg('storage')}储存库<span>${state.catalog.repositories.length}</span></button><button data-view="activity" class="${activeView === 'activity' ? 'active' : ''}">${svg('chart')}统计</button></nav><div class="sidebar-heading"><span>素材源</span><button id="choose-source">${svg('plus')}</button></div><div class="source-list">${sourceRows()}</div><div class="sidebar-bottom">${driveMonitor()}<nav class="bottom-nav"><button data-view="settings" class="${activeView === 'settings' ? 'active' : ''}">${svg('settings')}设置</button></nav></div></aside><main class="workspace"><header class="toolbar"><div class="toolbar-heading"><h1>${escapeHtml(heading.title)}</h1><span>${heading.subtitle}</span></div><div class="toolbar-actions">${activeView === 'mappings' ? `<button class="button primary" id="toolbar-new-mapping">${svg('plus')}新建映射</button>` : filterControls()}</div></header>${mainContent()}</main></div>`; bindEvents(); }
 
-function readEditor(): MappingInput {
-  const current = currentMapping();
-  return { id: current?.id, name: document.querySelector<HTMLInputElement>('#mapping-name')?.value.trim() || '', source: document.querySelector<HTMLInputElement>('#mapping-source')?.value || '', destination: document.querySelector<HTMLInputElement>('#mapping-destination')?.value || '', extensions: [...document.querySelectorAll<HTMLInputElement>('.extensions input:checked')].map((input) => input.value), startDate: document.querySelector<HTMLInputElement>('#mapping-start')?.value || '', endDate: document.querySelector<HTMLInputElement>('#mapping-end')?.value || '' };
-}
+function readMapping(): MappingInput { const sourceUuid = document.querySelector<HTMLSelectElement>('#mapping-source')?.value || ''; const drive = drives.find((item) => item.uuid === sourceUuid); const current = currentMapping(); return { id: current?.id, name: document.querySelector<HTMLInputElement>('#mapping-name')?.value || '', sourceUuid, source: drive?.path || current?.source || '', destination: document.querySelector<HTMLInputElement>('#mapping-destination')?.value || '', extensions: [...document.querySelectorAll<HTMLInputElement>('.extensions input:checked')].map((item) => item.value), startDate: document.querySelector<HTMLInputElement>('#mapping-start')?.value || '', endDate: document.querySelector<HTMLInputElement>('#mapping-end')?.value || '' }; }
+function readRepository() { const current = repositoryDraft || state.catalog.repositories.find((item) => item.id === selectedRepositoryId); return { id: current?.id, name: document.querySelector<HTMLInputElement>('#repo-name')?.value || '', type: (document.querySelector<HTMLSelectElement>('#repo-type')?.value || 'local') as RepositoryType, root: document.querySelector<HTMLInputElement>('#repo-root')?.value || '', address: document.querySelector<HTMLInputElement>('#repo-address')?.value || '', remotePath: document.querySelector<HTMLInputElement>('#repo-remote-path')?.value || '', username: document.querySelector<HTMLInputElement>('#repo-username')?.value || '', domain: document.querySelector<HTMLInputElement>('#repo-domain')?.value || '', port: Number(document.querySelector<HTMLInputElement>('#repo-port')?.value || 0), password: document.querySelector<HTMLInputElement>('#repo-password')?.value || '' }; }
 
-async function saveCurrent(): Promise<MappingProfile | null> {
-  try { const response = await window.materialGater.saveMapping(readEditor()); state = response.state; selectedMappingId = response.mapping.id; editorBuffer = null; return response.mapping; }
-  catch (error) { showToast(error instanceof Error ? error.message : '保存失败', 'error'); return null; }
-}
-
+function bindMediaInteractions() { document.querySelectorAll<HTMLElement>('[data-file-path]').forEach((row) => { row.ondblclick = () => void window.materialGater.openMedia(row.dataset.filePath!); row.oncontextmenu = (event) => { event.preventDefault(); void window.materialGater.showMediaMenu(row.dataset.filePath!); }; }); }
 function bindEvents() {
-  document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => button.onclick = () => { activeView = button.dataset.view as typeof activeView; render(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-source]').forEach((button) => button.onclick = () => { selectedSource = button.dataset.source || ''; activeView = 'source'; render(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-mapping]').forEach((button) => button.onclick = () => { selectedMappingId = button.dataset.mapping || ''; editorBuffer = null; deleteConfirmOpen = false; render(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((button) => button.onclick = () => { mediaMode = button.dataset.mode as typeof mediaMode; render(); });
-  const createNew = () => { activeView = 'mappings'; selectedMappingId = ''; editorBuffer = blankMapping(); render(); };
-  document.querySelector<HTMLButtonElement>('#new-mapping')?.addEventListener('click', createNew); document.querySelector<HTMLButtonElement>('#empty-new')?.addEventListener('click', createNew);
-  document.querySelector<HTMLInputElement>('#mapping-search')?.addEventListener('input', (event) => { mappingSearch = (event.target as HTMLInputElement).value; const list = document.querySelector('.mapping-list'); if (list) list.innerHTML = mappingRows(); });
-  document.querySelector<HTMLInputElement>('#file-search')?.addEventListener('change', (event) => { fileSearch = (event.target as HTMLInputElement).value; render(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => button.onclick = () => { activeView = button.dataset.view as View; render(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-source-uuid]').forEach((button) => button.onclick = () => { selectedSourceUuid = button.dataset.sourceUuid!; activeView = 'source'; rawPath = ''; rawEntries = []; void loadRaw(''); });
+  document.querySelector<HTMLButtonElement>('#choose-source')?.addEventListener('click', async () => { const path = await window.materialGater.chooseDirectory('选择素材目录'); if (path) { state = await window.materialGater.scan(path); render(); } });
+  document.querySelector<HTMLInputElement>('#file-search')?.addEventListener('input', (event) => { fileSearch = (event.target as HTMLInputElement).value; render(); });
   document.querySelector<HTMLSelectElement>('#filter-extension')?.addEventListener('change', (event) => { filterExtension = (event.target as HTMLSelectElement).value; render(); });
   document.querySelector<HTMLInputElement>('#filter-start')?.addEventListener('change', (event) => { filterStart = (event.target as HTMLInputElement).value; render(); });
   document.querySelector<HTMLInputElement>('#filter-end')?.addEventListener('change', (event) => { filterEnd = (event.target as HTMLInputElement).value; render(); });
-  document.querySelector<HTMLButtonElement>('#clear-filter')?.addEventListener('click', () => { fileSearch = ''; filterExtension = ''; filterStart = ''; filterEnd = ''; render(); });
-  document.querySelector<HTMLButtonElement>('#choose-source')!.onclick = async () => { const value = await window.materialGater.chooseDirectory('选择素材源目录'); if (value) { selectedSource = value; activeView = 'source'; render(); } };
-  document.querySelector<HTMLButtonElement>('#scan-source')?.addEventListener('click', async () => { busyAction = 'scan'; render(); try { state = await window.materialGater.scan(selectedSource); showToast(`已索引 ${state.stats.count} 个素材`); } catch (error) { showToast(error instanceof Error ? error.message : '扫描失败', 'error'); } finally { busyAction = ''; render(); } });
-  document.querySelector<HTMLButtonElement>('#pick-mapping-source')?.addEventListener('click', async () => { editorBuffer = readEditor(); const value = await window.materialGater.chooseDirectory('选择映射素材来源'); if (value && editorBuffer) editorBuffer.source = value; render(); });
-  document.querySelector<HTMLButtonElement>('#pick-destination')?.addEventListener('click', async () => { editorBuffer = readEditor(); const value = await window.materialGater.chooseDirectory('选择映射输出目录'); if (value && editorBuffer) editorBuffer.destination = value; render(); });
-  document.querySelector<HTMLButtonElement>('#save-mapping')?.addEventListener('click', async () => { busyAction = 'save'; editorBuffer = readEditor(); render(); const mapping = await saveCurrent(); busyAction = ''; render(); if (mapping) showToast('映射已保存'); });
-  document.querySelector<HTMLButtonElement>('#run-mapping')?.addEventListener('click', async () => { busyAction = 'run'; editorBuffer = readEditor(); render(); const mapping = await saveCurrent(); if (mapping) { try { const response = await window.materialGater.runMapping(mapping.id); state = response.state; showToast(`已生成 ${response.result.linked}/${response.result.total} 个链接`, response.result.failures.length ? 'error' : 'success'); } catch (error) { showToast(error instanceof Error ? error.message : '运行失败', 'error'); } } busyAction = ''; render(); });
-  document.querySelector<HTMLButtonElement>('#delete-mapping')?.addEventListener('click', () => { deleteConfirmOpen = true; render(); });
-  document.querySelector<HTMLButtonElement>('#cancel-delete')?.addEventListener('click', () => { deleteConfirmOpen = false; render(); });
-  const deleteMapping = async (cleanup: boolean) => {
-    if (!selectedMappingId) return;
-    busyAction = 'delete';
-    render();
-    try {
-      const response = await window.materialGater.deleteMapping({ id: selectedMappingId, cleanup });
-      state = response.state;
-      selectedMappingId = state.catalog.mappings[0]?.id || '';
-      editorBuffer = null;
-      deleteConfirmOpen = false;
-      showToast(response.cleanup?.message || '映射配置已删除');
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : '删除映射失败');
-    } finally {
-      busyAction = '';
-      render();
-    }
-  };
-  document.querySelector<HTMLButtonElement>('#delete-config-only')?.addEventListener('click', () => void deleteMapping(false));
-  document.querySelector<HTMLButtonElement>('#delete-with-links')?.addEventListener('click', () => void deleteMapping(true));
-  document.querySelector<HTMLButtonElement>('#open-data')!.onclick = () => void window.materialGater.openPath(state.dataDirectory);
+  document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((button) => button.onclick = () => { mediaMode = button.dataset.mode as 'list' | 'tree'; render(); });
+  bindMediaInteractions();
+  document.querySelectorAll<HTMLButtonElement>('[data-mapping]').forEach((button) => button.onclick = () => { selectedMappingId = button.dataset.mapping!; editorBuffer = null; render(); });
+  const newMapping = () => { editorBuffer = blankMapping(); selectedMappingId = ''; activeView = 'mappings'; render(); };
+  document.querySelector<HTMLButtonElement>('#new-mapping')?.addEventListener('click', newMapping); document.querySelector<HTMLButtonElement>('#toolbar-new-mapping')?.addEventListener('click', newMapping);
+  document.querySelector<HTMLButtonElement>('#pick-destination')?.addEventListener('click', async () => { editorBuffer = readMapping(); const value = await window.materialGater.chooseDirectory('选择链接输出目录'); if (value) editorBuffer.destination = value; render(); });
+  const saveMapping = async (run = false) => { busyAction = 'mapping'; try { const response = await window.materialGater.saveMapping(readMapping()); state = response.state; selectedMappingId = response.mapping.id; editorBuffer = null; if (run) { const result = await window.materialGater.runMapping(selectedMappingId); state = result.state; showToast(`已挂载 ${result.result.linked} 个链接`); } else showToast('映射已保存'); } catch (error) { showToast(String(error), 'error'); } busyAction = ''; render(); };
+  document.querySelector<HTMLButtonElement>('#save-mapping')?.addEventListener('click', () => void saveMapping()); document.querySelector<HTMLButtonElement>('#run-mapping')?.addEventListener('click', () => void saveMapping(true));
+  document.querySelector<HTMLButtonElement>('#delete-mapping')?.addEventListener('click', () => { deleteConfirmOpen = true; render(); }); document.querySelector<HTMLButtonElement>('#cancel-delete')?.addEventListener('click', () => { deleteConfirmOpen = false; render(); });
+  const deleteMapping = async (cleanup: boolean) => { const response = await window.materialGater.deleteMapping({ id: selectedMappingId, cleanup }); state = response.state; selectedMappingId = ''; deleteConfirmOpen = false; render(); showToast(response.cleanup?.message || '映射已删除'); };
+  document.querySelector<HTMLButtonElement>('#delete-config-only')?.addEventListener('click', () => void deleteMapping(false)); document.querySelector<HTMLButtonElement>('#delete-with-links')?.addEventListener('click', () => void deleteMapping(true));
+  document.querySelector<HTMLButtonElement>('#raw-back')?.addEventListener('click', () => void loadRaw(rawPath.split(/[\\/]/).slice(0, -1).join('/'))); document.querySelector<HTMLButtonElement>('#raw-scan')?.addEventListener('click', async () => { const drive = currentDrive(); if (drive) { state = await window.materialGater.scan(drive.path); showToast(`已索引 ${state.catalog.files.filter((file) => file.sourceUuid === drive.uuid).length} 个素材`); render(); } });
+  document.querySelectorAll<HTMLElement>('[data-raw-path]').forEach((row) => { row.ondblclick = () => row.dataset.directory === 'true' ? void loadRaw(row.dataset.rawRelative!) : void window.materialGater.openMedia(row.dataset.rawPath!); row.oncontextmenu = (event) => { event.preventDefault(); void window.materialGater.showMediaMenu(row.dataset.rawPath!); }; });
+  bindCopyEvents(); bindRepositoryEvents(); bindSettingsEvents();
 }
 
+function bindCopyEvents() {
+  document.querySelector<HTMLSelectElement>('#copy-source')?.addEventListener('change', (event) => { copySourceUuid = (event.target as HTMLSelectElement).value; copySelected.clear(); render(); });
+  document.querySelectorAll<HTMLInputElement>('[data-copy-ext]').forEach((input) => input.onchange = () => { copyExtensions = [...document.querySelectorAll<HTMLInputElement>('[data-copy-ext]:checked')].map((item) => item.dataset.copyExt!); copySelected.clear(); render(); });
+  document.querySelector<HTMLInputElement>('#copy-start')?.addEventListener('change', (event) => { copyStart = (event.target as HTMLInputElement).value; copySelected.clear(); render(); }); document.querySelector<HTMLInputElement>('#copy-end')?.addEventListener('change', (event) => { copyEnd = (event.target as HTMLInputElement).value; copySelected.clear(); render(); });
+  document.querySelector<HTMLButtonElement>('#copy-today')?.addEventListener('click', () => { const now = new Date(); const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`; copyStart = today; copyEnd = today; copySelected.clear(); render(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-quick-ext]').forEach((button) => button.onclick = () => { copyExtensions = [button.dataset.quickExt!]; copySelected.clear(); render(); });
+  document.querySelector<HTMLButtonElement>('#copy-clear-rule')?.addEventListener('click', () => { copyExtensions = []; copyStart = ''; copyEnd = ''; copySelected.clear(); render(); });
+  document.querySelectorAll<HTMLInputElement>('.copy-file-check').forEach((input) => input.onchange = () => { input.checked ? copySelected.add(input.dataset.copyId!) : copySelected.delete(input.dataset.copyId!); render(); });
+  document.querySelectorAll<HTMLInputElement>('.copy-group-check').forEach((input) => input.onchange = () => { const files = copyGroups().get(input.dataset.copyGroup!) || []; for (const file of files) input.checked ? copySelected.add(file.id) : copySelected.delete(file.id); render(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-copy-repository]').forEach((button) => button.onclick = () => { copyRepositoryId = button.dataset.copyRepository!; render(); });
+  document.querySelector<HTMLInputElement>('#copy-note')?.addEventListener('input', (event) => { copyNote = (event.target as HTMLInputElement).value; }); document.querySelector<HTMLInputElement>('#copy-template')?.addEventListener('input', (event) => { copyTemplate = (event.target as HTMLInputElement).value; });
+  document.querySelectorAll<HTMLInputElement>('input[name="copy-mode"]').forEach((input) => input.onchange = () => { copyMode = input.value as 'flat' | 'original'; });
+  document.querySelector<HTMLSelectElement>('#copy-preset')?.addEventListener('change', (event) => { const preset = state.catalog.presets.find((item) => item.id === (event.target as HTMLSelectElement).value); if (preset) { const now = new Date(); const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`; copyExtensions = preset.extensions; copyStart = preset.dateMode === 'today' ? today : preset.startDate; copyEnd = preset.dateMode === 'today' ? today : preset.endDate; copyRepositoryId = preset.repositoryId; copyTemplate = preset.pathTemplate; copyNote = preset.note; copyMode = preset.mode; copySelected.clear(); render(); } });
+  document.querySelector<HTMLButtonElement>('#go-repositories')?.addEventListener('click', () => { activeView = 'repositories'; render(); });
+  document.querySelector<HTMLButtonElement>('#save-copy-preset')?.addEventListener('click', async () => { const name = window.prompt('预设名称', copyNote ? `拷贝 ${copyNote}` : '新拷贝预设'); if (!name) return; const now = new Date(); const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`; state = await window.materialGater.savePreset({ name, extensions: copyExtensions, startDate: copyStart, endDate: copyEnd, dateMode: copyStart === today && copyEnd === today ? 'today' : 'fixed', repositoryId: copyRepositoryId, pathTemplate: copyTemplate, note: copyNote, mode: copyMode }); showToast('拷贝预设已保存'); render(); });
+  document.querySelector<HTMLButtonElement>('#start-copy')?.addEventListener('click', async () => { try { const response = await window.materialGater.createCopyTask({ name: copyNote || `拷贝 ${new Date().toLocaleDateString('zh-CN')}`, sourceUuid: copySourceUuid, repositoryId: copyRepositoryId, selection: { fileIds: [...copySelected] }, pathTemplate: copyTemplate, note: copyNote, mode: copyMode }); state = response.state; showToast('后台拷贝任务已启动'); render(); } catch (error) { showToast(String(error), 'error'); } });
+  document.querySelectorAll<HTMLButtonElement>('[data-pause-task]').forEach((button) => button.onclick = async () => { state = await window.materialGater.pauseCopyTask(button.dataset.pauseTask!); render(); }); document.querySelectorAll<HTMLButtonElement>('[data-resume-task]').forEach((button) => button.onclick = async () => { state = await window.materialGater.resumeCopyTask(button.dataset.resumeTask!); render(); });
+}
+
+function bindRepositoryEvents() {
+  document.querySelectorAll<HTMLButtonElement>('[data-repository]').forEach((button) => button.onclick = () => { selectedRepositoryId = button.dataset.repository!; repositoryDraft = null; render(); });
+  const create = () => { repositoryDraft = { name: '', type: 'local', root: '', address: '', remotePath: '', username: '', domain: '', port: null }; selectedRepositoryId = ''; render(); };
+  document.querySelector<HTMLButtonElement>('#new-repository')?.addEventListener('click', create); document.querySelector<HTMLButtonElement>('#empty-repository')?.addEventListener('click', create);
+  document.querySelector<HTMLSelectElement>('#repo-type')?.addEventListener('change', (event) => { repositoryDraft = { ...readRepository(), type: (event.target as HTMLSelectElement).value as RepositoryType }; render(); });
+  document.querySelector<HTMLButtonElement>('#pick-repo-root')?.addEventListener('click', async () => { repositoryDraft = readRepository(); const value = await window.materialGater.chooseDirectory('选择储存库目录'); if (value) repositoryDraft.root = value; render(); });
+  document.querySelector<HTMLButtonElement>('#save-repository')?.addEventListener('click', async () => { try { state = await window.materialGater.saveRepository(readRepository()); repositoryDraft = null; selectedRepositoryId = state.catalog.repositories.at(-1)?.id || selectedRepositoryId; if (!copyRepositoryId) copyRepositoryId = selectedRepositoryId; showToast('储存库已保存'); render(); } catch (error) { showToast(String(error), 'error'); } });
+  document.querySelector<HTMLButtonElement>('#test-repository')?.addEventListener('click', async () => { try { const result = await window.materialGater.testRepository(readRepository()); showToast(result.message); } catch (error) { showToast(String(error), 'error'); } });
+  document.querySelector<HTMLButtonElement>('#delete-repository')?.addEventListener('click', async () => { if (!window.confirm('删除这个储存库配置？已有文件不会被删除。')) return; state = await window.materialGater.deleteRepository(selectedRepositoryId); selectedRepositoryId = ''; render(); });
+}
+
+function bindSettingsEvents() { document.querySelector<HTMLButtonElement>('#save-settings')?.addEventListener('click', async () => { state = await window.materialGater.saveSettings({ foregroundScanMs: Number(document.querySelector<HTMLSelectElement>('#foreground-frequency')?.value), backgroundScanMs: Number(document.querySelector<HTMLSelectElement>('#background-frequency')?.value), askBeforeScan: document.querySelector<HTMLInputElement>('#ask-scan')?.checked, notifications: document.querySelector<HTMLInputElement>('#notifications')?.checked, keepRunning: document.querySelector<HTMLInputElement>('#keep-running')?.checked }); showToast('设置已保存'); render(); }); document.querySelector<HTMLButtonElement>('#open-data')?.addEventListener('click', () => void window.materialGater.openPath(state.dataDirectory)); }
+
 async function init() {
-  [state, drives] = await Promise.all([window.materialGater.getState(), window.materialGater.getDrives()]); selectedSource = state.catalog.source || drives[0]?.path || ''; selectedMappingId = state.catalog.mappings[0]?.id || '';
-  window.materialGater.onDrivesChanged((next) => { const speedMap = new Map(drives.map((drive) => [drive.id, drive])); drives = next.map((drive) => ({ ...drive, readBps: speedMap.get(drive.id)?.readBps || 0, writeBps: speedMap.get(drive.id)?.writeBps || 0 })); if (!selectedSource && drives[0]) selectedSource = drives[0].path; render(); });
-  window.materialGater.onDriveIo((speeds) => { const speedMap = new Map(speeds.map((item) => [item.id, item])); drives = drives.map((drive) => ({ ...drive, ...speedMap.get(drive.id) })); updateDriveSpeeds(); }); render();
+  [state, drives] = await Promise.all([window.materialGater.getState(), window.materialGater.getDrives()]); selectedSourceUuid = drives[0]?.uuid || ''; copySourceUuid = selectedSourceUuid; selectedMappingId = state.catalog.mappings[0]?.id || ''; selectedRepositoryId = state.catalog.repositories[0]?.id || ''; copyRepositoryId = selectedRepositoryId;
+  window.materialGater.onDrivesChanged((next) => { const speeds = new Map(drives.map((drive) => [drive.id, drive])); drives = next.map((drive) => ({ ...drive, readBps: speeds.get(drive.id)?.readBps || 0, writeBps: speeds.get(drive.id)?.writeBps || 0 })); if (!selectedSourceUuid && drives[0]) selectedSourceUuid = drives[0].uuid; render(); });
+  window.materialGater.onDriveIo((updates) => { const map = new Map(updates.map((item) => [item.id, item])); drives = drives.map((drive) => ({ ...drive, ...map.get(drive.id) })); updateDriveSpeeds(); });
+  window.materialGater.onStateChanged((next) => { state = next; render(); }); window.materialGater.onCopyChanged((tasks) => { state.catalog.tasks = tasks; if (activeView === 'copy') render(); });
+  window.materialGater.onSourceRemoved((info) => showToast(`${info.name} 已移除，${info.removedLinks} 个链接已卸载`, 'error')); window.materialGater.onScanCompleted((info) => showToast(`${info.name} 已索引 ${info.count} 个素材`)); render();
 }
 
 init().catch((error) => { root.innerHTML = `<div class="fatal">启动失败：${escapeHtml(String(error))}</div>`; });
