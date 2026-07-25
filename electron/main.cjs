@@ -99,7 +99,7 @@ async function showMainWindow() {
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1320, height: 840, minWidth: 1050, minHeight: 680,
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    titleBarStyle: 'default',
     backgroundColor: '#0c0f12',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });

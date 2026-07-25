@@ -20,7 +20,7 @@ button, input { font: inherit; }
 button { color: inherit; }
 svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .app-shell { height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); }
-.sidebar { padding: 36px 10px 12px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
+.sidebar { padding: 12px 10px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
 .brand { height: 40px; padding: 0 9px; display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
 .brand > span { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 7px; background: var(--accent); color: white; font-size: 10px; font-weight: 800; }
 .brand strong { font-size: 13px; letter-spacing: -.2px; }
