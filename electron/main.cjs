@@ -3,12 +3,14 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = fs.promises;
 const path = require('node:path');
-const { walkMedia, listDrives, createVirtualLibrary, summarize } = require('./core.cjs');
+const { walkMedia, listDrives, sampleDriveIo, createVirtualLibrary, cleanupVirtualLibrary, summarize } = require('./core.cjs');
 
 let mainWindow;
 let catalog = { version: 2, files: [], mappings: [], lastScan: null, source: null };
 let catalogPath;
 let driveTimer;
+let ioTimer;
+let currentDrives = [];
 let lastDriveSignature = '';
 
 function resolveDataDirectory() {
@@ -31,7 +33,7 @@ async function loadCatalog() {
     catalog = {
       version: 2,
       files: Array.isArray(stored.files) ? stored.files : [],
-      mappings: Array.isArray(stored.mappings) ? stored.mappings : [],
+      mappings: Array.isArray(stored.mappings) ? stored.mappings.map((mapping) => ({ ...mapping, source: mapping.source || stored.source || '' })) : [],
       lastScan: stored.lastScan || null,
       source: stored.source || null
     };
@@ -41,9 +43,11 @@ async function loadCatalog() {
 
 function validateMapping(input) {
   if (!input || typeof input !== 'object') throw new Error('映射配置无效');
+  if (!input.source || !path.isAbsolute(input.source)) throw new Error('请选择有效的素材来源');
   if (!input.destination || !path.isAbsolute(input.destination)) throw new Error('请选择有效的输出目录');
   return {
     name: String(input.name || '未命名映射').trim().slice(0, 80) || '未命名映射',
+    source: path.resolve(input.source),
     destination: path.resolve(input.destination),
     extensions: Array.isArray(input.extensions) ? [...new Set(input.extensions.map((item) => String(item).toLowerCase()))] : [],
     startDate: input.startDate || '',
@@ -77,19 +81,25 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   await loadCatalog();
+  currentDrives = await listDrives();
   await createWindow();
   driveTimer = setInterval(async () => {
     const drives = await listDrives();
+    currentDrives = drives;
     const signature = JSON.stringify(drives.map((drive) => drive.id).sort());
     if (signature !== lastDriveSignature) {
       lastDriveSignature = signature;
       mainWindow?.webContents.send('drives:changed', drives);
     }
   }, 4000);
+  ioTimer = setInterval(async () => {
+    const speeds = await sampleDriveIo(currentDrives);
+    mainWindow?.webContents.send('drives:io', speeds);
+  }, 1000);
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => clearInterval(driveTimer));
+app.on('before-quit', () => { clearInterval(driveTimer); clearInterval(ioTimer); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
 ipcMain.handle('state:get', () => state());
@@ -123,7 +133,9 @@ ipcMain.handle('mapping:save', async (_event, input) => {
 ipcMain.handle('mapping:run', async (_event, id) => {
   const mapping = catalog.mappings.find((item) => item.id === id);
   if (!mapping) throw new Error('找不到该映射');
-  const result = await createVirtualLibrary(catalog.files, mapping);
+  const sourceFiles = catalog.files.filter((file) => file.source === mapping.source);
+  if (!sourceFiles.length) throw new Error('该来源尚未建立索引，请先选择素材源并扫描');
+  const result = await createVirtualLibrary(sourceFiles, mapping);
   mapping.lastRun = {
     at: new Date().toISOString(), total: result.total, linked: result.linked, failed: result.failures.length
   };
@@ -131,10 +143,14 @@ ipcMain.handle('mapping:run', async (_event, id) => {
   await saveCatalog();
   return { state: state(), result };
 });
-ipcMain.handle('mapping:delete', async (_event, id) => {
+ipcMain.handle('mapping:delete', async (_event, request) => {
+  const id = typeof request === 'string' ? request : request?.id;
+  const mapping = catalog.mappings.find((item) => item.id === id);
+  if (!mapping) throw new Error('找不到该映射');
+  const cleanup = request?.cleanup ? await cleanupVirtualLibrary(mapping.destination, mapping.id) : null;
   catalog.mappings = catalog.mappings.filter((item) => item.id !== id);
   await saveCatalog();
-  return state();
+  return { state: state(), cleanup };
 });
 ipcMain.handle('catalog:clear', async () => {
   catalog = { ...catalog, version: 2, files: [], lastScan: null, source: null };
