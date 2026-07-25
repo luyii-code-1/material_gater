@@ -39,6 +39,15 @@ async function createWindow() {
     backgroundColor: '#0c0f12',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
+  mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error('[renderer] load failed', { code, description, url });
+  });
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error('[preload] failed', preloadPath, error);
+  });
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) console.error('[renderer]', message, `${sourceId}:${line}`);
+  });
   if (!app.isPackaged) await mainWindow.loadURL('http://127.0.0.1:5173');
   else await mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
 }
