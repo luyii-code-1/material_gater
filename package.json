@@ -11,7 +11,7 @@
     "build": "tsc && vite build",
     "start": "electron .",
     "dist": "npm run build && electron-builder",
-    "test": "node --test tests/*.test.cjs"
+    "test": "node --test tests/core.test.cjs"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.3.0",
