@@ -1,6 +1,6 @@
 {
   "name": "material-gater",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "跨平台素材拷贝、筛选与虚拟素材库管理工具",
   "main": "electron/main.cjs",
   "author": "luyii-code-1",
@@ -13,7 +13,9 @@
     "dist": "npm run build && electron-builder",
     "test": "node --test tests/*.test.cjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@fontsource-variable/noto-sans-sc": "^5.3.0"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "concurrently": "^9.2.0",
@@ -27,13 +29,29 @@
     "appId": "com.materialgater.app",
     "productName": "Material Gater",
     "asar": true,
-    "files": ["dist/**/*", "electron/**/*", "package.json"],
-    "directories": { "output": "release" },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.video"
     },
-    "win": { "target": ["portable", "nsis"] },
-    "portable": { "artifactName": "Material-Gater-${version}-Portable.${ext}" }
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "portable": {
+      "artifactName": "Material-Gater-${version}-Portable.${ext}"
+    }
   }
 }
