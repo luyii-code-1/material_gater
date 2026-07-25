@@ -38,9 +38,12 @@
       "package.json"
     ],
     "directories": {
+      "buildResources": "build",
       "output": "release"
     },
     "mac": {
+      "icon": "build/icon.png",
+      "artifactName": "Material-Gater-${version}-${arch}.${ext}",
       "target": [
         "dmg",
         "zip"
@@ -48,10 +51,14 @@
       "category": "public.app-category.video"
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "portable",
         "nsis"
       ]
+    },
+    "nsis": {
+      "artifactName": "Material-Gater-${version}-Setup.${ext}"
     },
     "portable": {
       "artifactName": "Material-Gater-${version}-Portable.${ext}"

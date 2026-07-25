@@ -1,5 +1,7 @@
 # Material Gater
 
+[![Build and Release](https://github.com/luyii-code-1/material_gater/actions/workflows/release.yml/badge.svg)](https://github.com/luyii-code-1/material_gater/actions/workflows/release.yml)
+
 Material Gater 是一款面向摄影、影视工作流的轻量跨平台素材门卫。它识别插入的 SD 卡或 SSD，建立本地索引，再按文件类型和拍摄日期生成一个干净的虚拟素材库，供 Premiere Pro、DaVinci Resolve、Final Cut Pro 等剪辑软件直接读取。
 
 > 当前版本：`0.6.0`。支持 macOS 与 Windows，界面语言为简体中文。
@@ -62,6 +64,8 @@ npm run dist
 
 - macOS 产物：DMG 与 ZIP
 - Windows 产物：Portable EXE 与 NSIS 安装包
+
+推送形如 `v0.6.0` 的版本标签后，GitHub Actions 会分别在 macOS 与 Windows 托管运行器中执行测试、构建原生安装包，并把 DMG、ZIP、Portable EXE 和 NSIS 安装包汇总到同一个 GitHub Release。也可以在 Actions 页面手动运行工作流，只生成可下载的 CI 构建产物而不发布 Release。
 
 未签名的本地构建可能被 Gatekeeper 或 SmartScreen 提示。正式发布时需配置 Apple Developer ID 和 Windows 代码签名证书。
 
