@@ -17,6 +17,7 @@ let filterExtension = '';
 let filterStart = '';
 let filterEnd = '';
 let toastTimer = 0;
+let deleteConfirmOpen = false;
 
 const commonExtensions = ['.mov', '.mp4', '.mxf', '.r3d', '.braw', '.wav', '.jpg'];
 const chartColors = ['#4d8df7', '#7c5ce5', '#2fb59a', '#ef9a3c', '#e85f74', '#66a94f', '#47a8c9', '#9c6c4b'];
@@ -62,7 +63,7 @@ function showToast(message: string, type: 'success' | 'error' = 'success') {
 }
 
 function blankMapping(): MappingInput {
-  return { name: `映射 ${state.catalog.mappings.length + 1}`, destination: '', extensions: [...commonExtensions], startDate: '', endDate: '' };
+  return { name: `映射 ${state.catalog.mappings.length + 1}`, source: selectedSource || state.catalog.source || '', destination: '', extensions: [...commonExtensions], startDate: '', endDate: '' };
 }
 
 function currentMapping(): MappingInput | null {
@@ -90,13 +91,32 @@ function sourceRows(): string {
   return rows || '<div class="pane-empty">未检测到外置磁盘</div>';
 }
 
+function formatRate(value = 0): string {
+  return value < 1024 ? '0 KB/s' : `${formatBytes(value)}/s`;
+}
+
+function driveMonitor(): string {
+  if (!drives.length) return '';
+  return `<section class="drive-monitor"><div class="monitor-title"><span>磁盘活动</span><i>实时</i></div>${drives.map((drive) => `<div class="monitor-row" data-speed-id="${escapeHtml(drive.id)}"><span class="monitor-dot"></span><strong>${escapeHtml(drive.name)}</strong><small><b class="read-speed">↓ ${formatRate(drive.readBps)}</b><b class="write-speed">↑ ${formatRate(drive.writeBps)}</b></small></div>`).join('')}</section>`;
+}
+
+function updateDriveSpeeds() {
+  for (const drive of drives) {
+    const row = document.querySelector<HTMLElement>(`[data-speed-id="${CSS.escape(drive.id)}"]`);
+    if (!row) continue;
+    const read = row.querySelector<HTMLElement>('.read-speed'); const write = row.querySelector<HTMLElement>('.write-speed');
+    if (read) read.textContent = `↓ ${formatRate(drive.readBps)}`;
+    if (write) write.textContent = `↑ ${formatRate(drive.writeBps)}`;
+  }
+}
+
 function mappingRows(): string {
   const mappings = state.catalog.mappings.filter((item) => `${item.name} ${item.destination}`.toLowerCase().includes(mappingSearch.toLowerCase()));
   if (!mappings.length) return `<div class="list-empty">${mappingSearch ? '没有匹配的映射' : '还没有映射<br><small>点击“新建映射”开始</small>'}</div>`;
   return mappings.map((mapping) => {
     const status = mapping.lastRun ? `${mapping.lastRun.linked}/${mapping.lastRun.total} 项` : '待运行';
     return `<button class="mapping-row ${mapping.id === selectedMappingId && !editorBuffer ? 'selected' : ''}" data-mapping="${mapping.id}">
-      <span class="mapping-symbol">${svg('map')}</span><span class="mapping-main"><strong>${escapeHtml(mapping.name)}</strong><small>${escapeHtml(mapping.destination)}</small></span>
+      <span class="mapping-symbol">${svg('map')}</span><span class="mapping-main"><strong>${escapeHtml(mapping.name)}</strong><small>${escapeHtml(mapping.source)} → ${escapeHtml(mapping.destination)}</small></span>
       <span class="mapping-status"><strong>${status}</strong><small>${formatDate(mapping.lastRun?.at)}</small></span><span class="chevron">›</span>
     </button>`;
   }).join('');
@@ -180,13 +200,21 @@ function editor(): string {
   if (!mapping) return `<section class="detail-placeholder">${svg('map')}<h2>选择一个映射</h2><p>在中间列表选择映射，或创建一个新的素材映射。</p><button class="button primary" id="empty-new">${svg('plus')}新建映射</button></section>`;
   const saved = mapping.id ? state.catalog.mappings.find((item) => item.id === mapping.id) : null;
   const available = [...new Set([...commonExtensions, ...Object.keys(state.stats.byType), ...mapping.extensions])].sort();
-  return `<section class="editor"><div class="editor-title"><div><span>${mapping.id ? '映射详情' : '新建映射'}</span><h2>${escapeHtml(mapping.name || '未命名映射')}</h2></div>${saved ? '<button class="icon-button danger" id="delete-mapping" title="删除映射">×</button>' : ''}</div>
+  const sourceCount = state.catalog.files.filter((file) => file.source === mapping.source).length;
+  return `<section class="editor"><div class="editor-title"><div><span>${mapping.id ? '映射详情' : '新建映射'}</span><h2>${escapeHtml(mapping.name || '未命名映射')}</h2></div></div>
     ${saved?.lastRun ? `<div class="run-summary"><span class="status-dot ${saved.lastRun.failed ? 'warning' : ''}"></span><div><strong>上次运行 ${formatDate(saved.lastRun.at)}</strong><small>${saved.lastRun.linked} 个链接成功${saved.lastRun.failed ? `，${saved.lastRun.failed} 个失败` : ''}</small></div></div>` : ''}
     <label class="field"><span>名称</span><input id="mapping-name" value="${escapeHtml(mapping.name)}" placeholder="例如：今日 MOV 素材"></label>
-    <label class="field"><span>输出目录</span><div class="path-input"><input id="mapping-destination" readonly value="${escapeHtml(mapping.destination)}" placeholder="选择剪辑软件读取的目录"><button id="pick-destination">选择…</button></div></label>
+    <div class="mapping-flow">
+      <label class="flow-step"><span><i>1</i>素材来源</span><div class="path-input"><input id="mapping-source" readonly value="${escapeHtml(mapping.source)}" placeholder="选择硬盘或素材文件夹"><button id="pick-mapping-source">选择来源</button></div><small>${sourceCount ? `已索引 ${sourceCount} 个素材` : '选择后请在左侧扫描该来源'}</small></label>
+      <div class="flow-arrow">↓</div>
+      <label class="flow-step"><span><i>2</i>输出位置</span><div class="path-input"><input id="mapping-destination" readonly value="${escapeHtml(mapping.destination)}" placeholder="选择生成链接的目录"><button id="pick-destination">选择位置</button></div><small>剪辑软件将从这里读取链接素材</small></label>
+    </div>
     <div class="field"><span>文件类型</span><div class="extensions">${available.map((ext) => `<label><input type="checkbox" value="${ext}" ${mapping.extensions.includes(ext) ? 'checked' : ''}><span>${ext.slice(1).toUpperCase()}</span></label>`).join('')}</div></div>
     <div class="date-grid"><label class="field"><span>开始日期</span><input id="mapping-start" type="date" value="${mapping.startDate}"></label><label class="field"><span>结束日期</span><input id="mapping-end" type="date" value="${mapping.endDate}"></label></div>
-    <p class="note">留空日期表示全部素材。源文件不会被复制或修改。</p><div class="editor-actions"><button class="button" id="save-mapping" ${busyAction ? 'disabled' : ''}>${busyAction === 'save' ? '保存中…' : '保存'}</button><button class="button primary" id="run-mapping" ${!state.stats.count || busyAction ? 'disabled' : ''}>${svg('play')}${busyAction === 'run' ? '运行中…' : '保存并运行'}</button></div></section>`;
+    <p class="note">留空日期表示全部素材。源文件不会被复制或修改。</p>
+    <div class="editor-actions">${saved ? '<button class="button danger-outline" id="delete-mapping">删除映射…</button>' : '<span></span>'}<div><button class="button" id="save-mapping" ${busyAction ? 'disabled' : ''}>${busyAction === 'save' ? '保存中…' : '保存'}</button><button class="button primary" id="run-mapping" ${!sourceCount || busyAction ? 'disabled' : ''}>${svg('play')}${busyAction === 'run' ? '运行中…' : '保存并运行'}</button></div></div>
+    ${deleteConfirmOpen && saved ? `<div class="delete-panel"><strong>删除“${escapeHtml(saved.name)}”</strong><p>你可以只删除配置，或同时清理该映射清单中记录的链接。输出目录里的其他文件不会被删除。</p><div><button class="button" id="cancel-delete">取消</button><button class="button danger-outline" id="delete-config-only">仅删除配置</button><button class="button danger-solid" id="delete-with-links">删除配置与链接</button></div></div>` : ''}
+  </section>`;
 }
 
 function filterControls(): string {
@@ -218,7 +246,7 @@ function render() {
       <button class="${activeView === 'activity' ? 'active' : ''}" data-view="activity">${svg('chart')}统计</button></nav>
       <div class="sidebar-heading"><span>素材源</span><button id="choose-source" title="选择目录">${svg('plus')}</button></div><div class="source-list">${sourceRows()}</div>
       ${selectedSource ? `<div class="scan-box"><span title="${escapeHtml(selectedSource)}">${escapeHtml(selectedSource)}</span><button id="scan-source" ${busyAction ? 'disabled' : ''}>${busyAction === 'scan' ? '扫描中…' : '重新扫描'}</button></div>` : ''}
-      <button class="data-location" id="open-data">${svg('folder')}<span>本地数据库<small>${escapeHtml(state.dataDirectory)}</small></span></button></aside>
+      <div class="sidebar-bottom">${driveMonitor()}<button class="data-location" id="open-data">${svg('folder')}<span>本地数据库<small>${escapeHtml(state.dataDirectory)}</small></span></button></div></aside>
     <main class="workspace"><header class="toolbar"><div class="toolbar-heading"><h1>${escapeHtml(heading.title)}</h1><span>${heading.subtitle}</span></div><div class="toolbar-actions">${activeView === 'mappings' ? `<label class="search">${svg('search')}<input id="mapping-search" value="${escapeHtml(mappingSearch)}" placeholder="搜索映射"></label><button class="button primary" id="new-mapping">${svg('plus')}新建映射</button>` : filterControls()}</div></header>
       <div class="work-area ${activeView !== 'mappings' ? 'single' : ''}"><section class="list-pane">${centerContent()}</section>${activeView === 'mappings' ? `<aside class="detail-pane">${editor()}</aside>` : ''}</div></main></div>`;
   bindEvents();
@@ -226,7 +254,7 @@ function render() {
 
 function readEditor(): MappingInput {
   const current = currentMapping();
-  return { id: current?.id, name: document.querySelector<HTMLInputElement>('#mapping-name')?.value.trim() || '', destination: document.querySelector<HTMLInputElement>('#mapping-destination')?.value || '', extensions: [...document.querySelectorAll<HTMLInputElement>('.extensions input:checked')].map((input) => input.value), startDate: document.querySelector<HTMLInputElement>('#mapping-start')?.value || '', endDate: document.querySelector<HTMLInputElement>('#mapping-end')?.value || '' };
+  return { id: current?.id, name: document.querySelector<HTMLInputElement>('#mapping-name')?.value.trim() || '', source: document.querySelector<HTMLInputElement>('#mapping-source')?.value || '', destination: document.querySelector<HTMLInputElement>('#mapping-destination')?.value || '', extensions: [...document.querySelectorAll<HTMLInputElement>('.extensions input:checked')].map((input) => input.value), startDate: document.querySelector<HTMLInputElement>('#mapping-start')?.value || '', endDate: document.querySelector<HTMLInputElement>('#mapping-end')?.value || '' };
 }
 
 async function saveCurrent(): Promise<MappingProfile | null> {
@@ -237,7 +265,7 @@ async function saveCurrent(): Promise<MappingProfile | null> {
 function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => button.onclick = () => { activeView = button.dataset.view as typeof activeView; render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-source]').forEach((button) => button.onclick = () => { selectedSource = button.dataset.source || ''; activeView = 'source'; render(); });
-  document.querySelectorAll<HTMLButtonElement>('[data-mapping]').forEach((button) => button.onclick = () => { selectedMappingId = button.dataset.mapping || ''; editorBuffer = null; render(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-mapping]').forEach((button) => button.onclick = () => { selectedMappingId = button.dataset.mapping || ''; editorBuffer = null; deleteConfirmOpen = false; render(); });
   document.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((button) => button.onclick = () => { mediaMode = button.dataset.mode as typeof mediaMode; render(); });
   const createNew = () => { activeView = 'mappings'; selectedMappingId = ''; editorBuffer = blankMapping(); render(); };
   document.querySelector<HTMLButtonElement>('#new-mapping')?.addEventListener('click', createNew); document.querySelector<HTMLButtonElement>('#empty-new')?.addEventListener('click', createNew);
@@ -249,16 +277,39 @@ function bindEvents() {
   document.querySelector<HTMLButtonElement>('#clear-filter')?.addEventListener('click', () => { fileSearch = ''; filterExtension = ''; filterStart = ''; filterEnd = ''; render(); });
   document.querySelector<HTMLButtonElement>('#choose-source')!.onclick = async () => { const value = await window.materialGater.chooseDirectory('选择素材源目录'); if (value) { selectedSource = value; activeView = 'source'; render(); } };
   document.querySelector<HTMLButtonElement>('#scan-source')?.addEventListener('click', async () => { busyAction = 'scan'; render(); try { state = await window.materialGater.scan(selectedSource); showToast(`已索引 ${state.stats.count} 个素材`); } catch (error) { showToast(error instanceof Error ? error.message : '扫描失败', 'error'); } finally { busyAction = ''; render(); } });
+  document.querySelector<HTMLButtonElement>('#pick-mapping-source')?.addEventListener('click', async () => { editorBuffer = readEditor(); const value = await window.materialGater.chooseDirectory('选择映射素材来源'); if (value && editorBuffer) editorBuffer.source = value; render(); });
   document.querySelector<HTMLButtonElement>('#pick-destination')?.addEventListener('click', async () => { editorBuffer = readEditor(); const value = await window.materialGater.chooseDirectory('选择映射输出目录'); if (value && editorBuffer) editorBuffer.destination = value; render(); });
   document.querySelector<HTMLButtonElement>('#save-mapping')?.addEventListener('click', async () => { busyAction = 'save'; editorBuffer = readEditor(); render(); const mapping = await saveCurrent(); busyAction = ''; render(); if (mapping) showToast('映射已保存'); });
   document.querySelector<HTMLButtonElement>('#run-mapping')?.addEventListener('click', async () => { busyAction = 'run'; editorBuffer = readEditor(); render(); const mapping = await saveCurrent(); if (mapping) { try { const response = await window.materialGater.runMapping(mapping.id); state = response.state; showToast(`已生成 ${response.result.linked}/${response.result.total} 个链接`, response.result.failures.length ? 'error' : 'success'); } catch (error) { showToast(error instanceof Error ? error.message : '运行失败', 'error'); } } busyAction = ''; render(); });
-  document.querySelector<HTMLButtonElement>('#delete-mapping')?.addEventListener('click', async () => { if (!selectedMappingId || !confirm('删除此映射配置？已生成的素材链接不会被删除。')) return; state = await window.materialGater.deleteMapping(selectedMappingId); selectedMappingId = state.catalog.mappings[0]?.id || ''; editorBuffer = null; render(); showToast('映射配置已删除'); });
+  document.querySelector<HTMLButtonElement>('#delete-mapping')?.addEventListener('click', () => { deleteConfirmOpen = true; render(); });
+  document.querySelector<HTMLButtonElement>('#cancel-delete')?.addEventListener('click', () => { deleteConfirmOpen = false; render(); });
+  const deleteMapping = async (cleanup: boolean) => {
+    if (!selectedMappingId) return;
+    busyAction = 'delete';
+    render();
+    try {
+      const response = await window.materialGater.deleteMapping({ id: selectedMappingId, cleanup });
+      state = response.state;
+      selectedMappingId = state.catalog.mappings[0]?.id || '';
+      editorBuffer = null;
+      deleteConfirmOpen = false;
+      showToast(response.cleanup?.message || '映射配置已删除');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '删除映射失败');
+    } finally {
+      busyAction = '';
+      render();
+    }
+  };
+  document.querySelector<HTMLButtonElement>('#delete-config-only')?.addEventListener('click', () => void deleteMapping(false));
+  document.querySelector<HTMLButtonElement>('#delete-with-links')?.addEventListener('click', () => void deleteMapping(true));
   document.querySelector<HTMLButtonElement>('#open-data')!.onclick = () => void window.materialGater.openPath(state.dataDirectory);
 }
 
 async function init() {
   [state, drives] = await Promise.all([window.materialGater.getState(), window.materialGater.getDrives()]); selectedSource = state.catalog.source || drives[0]?.path || ''; selectedMappingId = state.catalog.mappings[0]?.id || '';
-  window.materialGater.onDrivesChanged((next) => { drives = next; if (!selectedSource && drives[0]) selectedSource = drives[0].path; render(); }); render();
+  window.materialGater.onDrivesChanged((next) => { const speedMap = new Map(drives.map((drive) => [drive.id, drive])); drives = next.map((drive) => ({ ...drive, readBps: speedMap.get(drive.id)?.readBps || 0, writeBps: speedMap.get(drive.id)?.writeBps || 0 })); if (!selectedSource && drives[0]) selectedSource = drives[0].path; render(); });
+  window.materialGater.onDriveIo((speeds) => { const speedMap = new Map(speeds.map((item) => [item.id, item])); drives = drives.map((drive) => ({ ...drive, ...speedMap.get(drive.id) })); updateDriveSpeeds(); }); render();
 }
 
 init().catch((error) => { root.innerHTML = `<div class="fatal">启动失败：${escapeHtml(String(error))}</div>`; });

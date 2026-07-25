@@ -1,6 +1,6 @@
 {
   "name": "material-gater",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "跨平台素材拷贝、筛选与虚拟素材库管理工具",
   "main": "electron/main.cjs",
   "author": "luyii-code-1",

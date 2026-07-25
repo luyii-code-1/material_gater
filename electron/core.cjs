@@ -2,9 +2,12 @@ const fs = require('node:fs');
 const fsp = fs.promises;
 const path = require('node:path');
 const os = require('node:os');
-const { execFile } = require('node:child_process');
+const { exec, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
+let previousIoCounters = new Map();
+let previousIoTime = Date.now();
 
 const MEDIA_EXTENSIONS = new Set([
   '.mov', '.mp4', '.mxf', '.avi', '.mkv', '.m4v', '.r3d', '.braw', '.ari',
@@ -68,7 +71,12 @@ async function listDrives(platform = process.platform) {
       try {
         const stat = await fsp.stat(mount);
         if (!stat.isDirectory() || name === 'Macintosh HD') continue;
-        results.push({ id: mount, name, path: mount, kind: /sd|card|untitled/i.test(name) ? 'SD' : '外置磁盘' });
+        let device = '';
+        try {
+          const { stdout } = await execFileAsync('/usr/sbin/diskutil', ['info', mount]);
+          device = stdout.match(/Part of Whole:\s+(disk\d+)/)?.[1] || stdout.match(/Device Identifier:\s+(disk\d+)/)?.[1] || '';
+        } catch { /* volume may have disappeared */ }
+        results.push({ id: mount, name, path: mount, device, kind: /sd|card|untitled/i.test(name) ? 'SD' : '外置磁盘' });
       } catch { /* disappeared */ }
     }
     return results;
@@ -89,6 +97,47 @@ async function listDrives(platform = process.platform) {
     } catch { return []; }
   }
   return [];
+}
+
+async function sampleDriveIo(drives, platform = process.platform) {
+  if (!drives.length) return [];
+  if (platform === 'darwin') {
+    try {
+      const command = `/usr/sbin/ioreg -r -c IOBlockStorageDriver -l | /usr/bin/grep -E '"Statistics"| "BSD Name"'`;
+      const { stdout } = await execAsync(command, { maxBuffer: 2 * 1024 * 1024 });
+      const counters = new Map();
+      // IORegistry also prints nested APFS statistics. Only the driver-level
+      // block contains the exact cumulative "Bytes (Read/Write)" counters.
+      const pattern = /"Statistics" = (\{(?=[^\n]*"Bytes \(Read\)"=\d+)(?=[^\n]*"Bytes \(Write\)"=\d+)[^\n]+\})[\s\S]*?"BSD Name" = "(disk\d+)"/g;
+      for (const match of stdout.matchAll(pattern)) {
+        const read = Number(match[1].match(/"Bytes \(Read\)"=(\d+)/)?.[1] || 0);
+        const write = Number(match[1].match(/"Bytes \(Write\)"=(\d+)/)?.[1] || 0);
+        counters.set(match[2], { read, write });
+      }
+      const now = Date.now();
+      const elapsed = Math.max(0.25, (now - previousIoTime) / 1000);
+      const result = drives.map((drive) => {
+        const current = counters.get(drive.device);
+        const previous = previousIoCounters.get(drive.device);
+        return { id: drive.id, readBps: current && previous ? Math.max(0, (current.read - previous.read) / elapsed) : 0, writeBps: current && previous ? Math.max(0, (current.write - previous.write) / elapsed) : 0 };
+      });
+      previousIoCounters = counters; previousIoTime = now;
+      return result;
+    } catch { return drives.map((drive) => ({ id: drive.id, readBps: 0, writeBps: 0 })); }
+  }
+  if (platform === 'win32') {
+    const script = "Get-CimInstance Win32_PerfFormattedData_PerfDisk_LogicalDisk | Where-Object {$_.Name -ne '_Total'} | Select-Object Name,DiskReadBytesPersec,DiskWriteBytesPersec | ConvertTo-Json -Compress";
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true });
+      const parsed = JSON.parse(stdout.trim() || '[]');
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
+      return drives.map((drive) => {
+        const row = rows.find((item) => item.Name === drive.id);
+        return { id: drive.id, readBps: Number(row?.DiskReadBytesPersec || 0), writeBps: Number(row?.DiskWriteBytesPersec || 0) };
+      });
+    } catch { return drives.map((drive) => ({ id: drive.id, readBps: 0, writeBps: 0 })); }
+  }
+  return drives.map((drive) => ({ id: drive.id, readBps: 0, writeBps: 0 }));
 }
 
 async function linkFile(source, target) {
@@ -118,6 +167,7 @@ async function createVirtualLibrary(files, options) {
     return (!selectedExts.size || selectedExts.has(file.extension)) && (!start || date >= start) && (!end || date <= end);
   });
   let linked = 0;
+  const targets = [];
   const failures = [];
   for (const file of selected) {
     if (!isWithin(file.source, file.path)) continue;
@@ -128,12 +178,71 @@ async function createVirtualLibrary(files, options) {
       await fsp.rm(target, { force: true });
       await linkFile(file.path, target);
       linked += 1;
+      targets.push({ path: path.relative(destination, target), source: file.path });
     } catch (error) { failures.push({ file: file.path, error: error.message }); }
   }
-  const manifest = { createdAt: new Date().toISOString(), filters: options, total: selected.length, linked, failures };
+  const manifest = { version: 3, mappingId: options.id || null, createdAt: new Date().toISOString(), filters: options, targets, total: selected.length, linked, failures };
   await fsp.mkdir(destination, { recursive: true });
   await fsp.writeFile(path.join(destination, '.material-gater.json'), JSON.stringify(manifest, null, 2));
   return manifest;
+}
+
+async function removeLegacyLinks(directory) {
+  let removed = 0;
+  const entries = await fsp.readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const target = path.join(directory, entry.name);
+    const stat = await fsp.lstat(target).catch(() => null);
+    if (!stat) continue;
+    if (stat.isSymbolicLink()) { await fsp.rm(target, { force: true }); removed += 1; }
+    else if (stat.isDirectory()) removed += await removeLegacyLinks(target);
+  }
+  return removed;
+}
+
+async function pruneEmptyDirectories(directory, includeRoot = true) {
+  const entries = await fsp.readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) if (entry.isDirectory()) await pruneEmptyDirectories(path.join(directory, entry.name), true);
+  const remaining = await fsp.readdir(directory).catch(() => null);
+  if (includeRoot && remaining?.length === 0) await fsp.rmdir(directory).catch(() => {});
+}
+
+async function cleanupVirtualLibrary(destination, mappingId) {
+  const root = path.resolve(destination);
+  if (root === path.parse(root).root) throw new Error('拒绝清理磁盘根目录');
+  const manifestPath = path.join(root, '.material-gater.json');
+  let manifest;
+  try { manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8')); }
+  catch { return { removed: 0, kept: true, message: '输出目录没有 Material Gater 清单，未删除任何文件' }; }
+  if (manifest.mappingId && mappingId && manifest.mappingId !== mappingId) throw new Error('输出目录属于另一个映射，已停止清理');
+  let removed = 0;
+  if (Array.isArray(manifest.targets)) {
+    for (const entry of manifest.targets) {
+      const relative = typeof entry === 'string' ? entry : entry?.path;
+      if (!relative) continue;
+      const target = path.resolve(root, relative);
+      if (!isWithin(root, target) || target === root) continue;
+      const targetStat = await fsp.lstat(target).catch(() => null);
+      if (!targetStat) continue;
+      let managed = typeof entry === 'string';
+      if (!managed && entry.source) {
+        if (targetStat.isSymbolicLink()) {
+          const link = await fsp.readlink(target).catch(() => '');
+          managed = path.resolve(path.dirname(target), link) === path.resolve(entry.source);
+        } else {
+          const sourceStat = await fsp.stat(entry.source).catch(() => null);
+          managed = Boolean(sourceStat && targetStat.dev === sourceStat.dev && targetStat.ino === sourceStat.ino);
+        }
+      }
+      if (managed) { await fsp.rm(target, { force: true }); removed += 1; }
+    }
+  } else {
+    removed = await removeLegacyLinks(root);
+  }
+  await fsp.rm(manifestPath, { force: true });
+  await pruneEmptyDirectories(root, true);
+  const kept = Boolean(await fsp.stat(root).catch(() => null));
+  return { removed, kept, message: kept ? `已删除 ${removed} 个受管链接；目录中其他文件已保留` : `已删除 ${removed} 个受管链接和空目录` };
 }
 
 function summarize(files) {
@@ -151,4 +260,4 @@ function summarize(files) {
   return { count: files.length, size: files.reduce((sum, file) => sum + file.size, 0), byDay, byType };
 }
 
-module.exports = { MEDIA_EXTENSIONS, formatDay, isWithin, walkMedia, listDrives, createVirtualLibrary, summarize };
+module.exports = { MEDIA_EXTENSIONS, formatDay, isWithin, walkMedia, listDrives, sampleDriveIo, createVirtualLibrary, cleanupVirtualLibrary, summarize };
