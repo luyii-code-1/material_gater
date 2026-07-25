@@ -71,23 +71,25 @@ async function listDrives(platform = process.platform) {
       try {
         const stat = await fsp.stat(mount);
         if (!stat.isDirectory() || name === 'Macintosh HD') continue;
-        let device = '';
+        let device = ''; let uuid = '';
         try {
           const { stdout } = await execFileAsync('/usr/sbin/diskutil', ['info', mount]);
           device = stdout.match(/Part of Whole:\s+(disk\d+)/)?.[1] || stdout.match(/Device Identifier:\s+(disk\d+)/)?.[1] || '';
+          uuid = stdout.match(/Volume UUID:\s+([A-Fa-f0-9-]+)/)?.[1]?.toUpperCase() || stdout.match(/Disk \/ Partition UUID:\s+([A-Fa-f0-9-]+)/)?.[1]?.toUpperCase() || '';
         } catch { /* volume may have disappeared */ }
-        results.push({ id: mount, name, path: mount, device, kind: /sd|card|untitled/i.test(name) ? 'SD' : '外置磁盘' });
+        results.push({ id: uuid || mount, uuid: uuid || mount, name, path: mount, device, kind: /sd|card|untitled/i.test(name) ? 'SD' : '外置磁盘' });
       } catch { /* disappeared */ }
     }
     return results;
   }
   if (platform === 'win32') {
-    const script = "Get-CimInstance Win32_LogicalDisk | Where-Object {$_.DriveType -in 2,3} | Select-Object DeviceID,VolumeName,DriveType,Size,FreeSpace | ConvertTo-Json -Compress";
+    const script = "Get-CimInstance Win32_LogicalDisk | Where-Object {$_.DriveType -in 2,3} | Select-Object DeviceID,VolumeName,VolumeSerialNumber,DriveType,Size,FreeSpace | ConvertTo-Json -Compress";
     try {
       const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], { windowsHide: true });
       const parsed = JSON.parse(stdout.trim() || '[]');
       return (Array.isArray(parsed) ? parsed : [parsed]).map((disk) => ({
-        id: disk.DeviceID,
+        id: disk.VolumeSerialNumber ? `${disk.DeviceID}:${disk.VolumeSerialNumber}` : disk.DeviceID,
+        uuid: disk.VolumeSerialNumber ? `${disk.DeviceID}:${disk.VolumeSerialNumber}` : disk.DeviceID,
         name: disk.VolumeName || disk.DeviceID,
         path: `${disk.DeviceID}\\`,
         kind: disk.DriveType === 2 ? '可移动磁盘' : '本地磁盘',
@@ -97,6 +99,27 @@ async function listDrives(platform = process.platform) {
     } catch { return []; }
   }
   return [];
+}
+
+async function listDirectory(root, relative = '') {
+  const base = path.resolve(root);
+  const directory = path.resolve(base, relative || '.');
+  if (!isWithin(base, directory)) throw new Error('目录超出素材源范围');
+  const entries = await fsp.readdir(directory, { withFileTypes: true });
+  const rows = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'System Volume Information' || entry.name === '$RECYCLE.BIN') continue;
+    const absolute = path.join(directory, entry.name);
+    try {
+      const stat = await fsp.stat(absolute);
+      rows.push({
+        name: entry.name, path: absolute, relativePath: path.relative(base, absolute),
+        directory: entry.isDirectory(), extension: entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase(),
+        size: stat.size, modifiedAt: stat.mtime.toISOString()
+      });
+    } catch { /* item disappeared */ }
+  }
+  return rows.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name, 'zh-CN'));
 }
 
 async function sampleDriveIo(drives, platform = process.platform) {
@@ -260,4 +283,4 @@ function summarize(files) {
   return { count: files.length, size: files.reduce((sum, file) => sum + file.size, 0), byDay, byType };
 }
 
-module.exports = { MEDIA_EXTENSIONS, formatDay, isWithin, walkMedia, listDrives, sampleDriveIo, createVirtualLibrary, cleanupVirtualLibrary, summarize };
+module.exports = { MEDIA_EXTENSIONS, formatDay, isWithin, walkMedia, listDirectory, listDrives, sampleDriveIo, createVirtualLibrary, cleanupVirtualLibrary, summarize };

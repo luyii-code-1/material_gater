@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { formatDay, isWithin, walkMedia, createVirtualLibrary, cleanupVirtualLibrary, summarize } = require('../electron/core.cjs');
+const { formatDay, isWithin, walkMedia, listDirectory, createVirtualLibrary, cleanupVirtualLibrary, summarize } = require('../electron/core.cjs');
+const { expandPathTemplate, selectFiles, copyFileResumable, CopyManager } = require('../electron/copy-engine.cjs');
 
 test('formatDay uses local calendar date', () => {
   assert.match(formatDay(new Date(2026, 6, 25, 12)), /^2026-07-25$/);
@@ -69,4 +70,49 @@ test('cleanup preserves a user file that replaced a managed link', async (t) => 
   assert.equal(cleanup.removed, 0);
   assert.equal(cleanup.kept, true);
   assert.equal(await fs.readFile(target, 'utf8'), 'user replacement');
+});
+
+test('raw directory listing includes folders and non-media files', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'material-gater-browser-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  await fs.mkdir(path.join(temp, 'DCIM'));
+  await fs.writeFile(path.join(temp, 'notes.txt'), 'notes');
+  const entries = await listDirectory(temp);
+  assert.deepEqual(entries.map((entry) => [entry.name, entry.directory]), [['DCIM', true], ['notes.txt', false]]);
+});
+
+test('copy templates, filters and resumable local writes', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'material-gater-copy-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const source = path.join(temp, 'clip.mov');
+  const destination = path.join(temp, 'vault', 'clip.mov');
+  const content = Buffer.alloc(2 * 1024 * 1024, 7);
+  await fs.writeFile(source, content);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.writeFile(`${destination}.material-gater.part`, content.subarray(0, 512 * 1024));
+  let transferred = 0;
+  await copyFileResumable(source, destination, (bytes) => { transferred += bytes; });
+  assert.equal((await fs.stat(destination)).size, content.length);
+  assert.equal(transferred, content.length - 512 * 1024);
+  const file = { id: '1', extension: '.mov', capturedAt: '2026-07-26T08:09:10.000Z' };
+  assert.match(expandPathTemplate('%day/%note("悟3")/%time', file), /^2026-07-26[/\\]悟3[/\\]/);
+  assert.equal(selectFiles([file], { extensions: ['.mov'], startDate: '2026-07-26', endDate: '2026-07-26' }).length, 1);
+});
+
+test('copy manager completes and persists a background task', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'material-gater-task-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const source = path.join(temp, 'source', 'clip.mov');
+  const repository = { id: 'repo', type: 'local', root: path.join(temp, 'vault') };
+  await fs.mkdir(path.dirname(source)); await fs.writeFile(source, Buffer.alloc(512 * 1024, 3));
+  let persisted = 0;
+  const manager = new CopyManager({ tasks: [], resolveRepository: () => repository, persist: async () => { persisted += 1; } });
+  const completed = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('copy task timeout')), 3000);
+    manager.on('changed', (tasks) => { if (tasks[0]?.status === 'completed') { clearTimeout(timer); resolve(tasks[0]); } });
+  });
+  await manager.create({ name: 'test', repositoryId: 'repo', sourceUuid: 'source', selection: { fileIds: ['file'] }, pathTemplate: '%day/%note', note: 'unit', mode: 'flat' }, [{ id: 'file', name: 'clip.mov', path: source, relativePath: 'clip.mov', extension: '.mov', size: 512 * 1024, capturedAt: '2026-07-26T08:00:00.000Z' }]);
+  const task = await completed;
+  assert.equal(task.status, 'completed'); assert.ok(persisted >= 2);
+  assert.equal((await fs.stat(path.join(repository.root, '2026-07-26', 'unit', 'clip.mov'))).size, 512 * 1024);
 });
