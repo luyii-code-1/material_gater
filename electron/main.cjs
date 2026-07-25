@@ -1,11 +1,12 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = fs.promises;
 const path = require('node:path');
 const { walkMedia, listDrives, createVirtualLibrary, summarize } = require('./core.cjs');
 
 let mainWindow;
-let catalog = { version: 1, files: [], lastScan: null, source: null };
+let catalog = { version: 2, files: [], mappings: [], lastScan: null, source: null };
 let catalogPath;
 let driveTimer;
 let lastDriveSignature = '';
@@ -25,7 +26,29 @@ async function saveCatalog() {
 
 async function loadCatalog() {
   catalogPath = path.join(resolveDataDirectory(), 'catalog.json');
-  try { catalog = JSON.parse(await fsp.readFile(catalogPath, 'utf8')); } catch { await saveCatalog(); }
+  try {
+    const stored = JSON.parse(await fsp.readFile(catalogPath, 'utf8'));
+    catalog = {
+      version: 2,
+      files: Array.isArray(stored.files) ? stored.files : [],
+      mappings: Array.isArray(stored.mappings) ? stored.mappings : [],
+      lastScan: stored.lastScan || null,
+      source: stored.source || null
+    };
+    await saveCatalog();
+  } catch { await saveCatalog(); }
+}
+
+function validateMapping(input) {
+  if (!input || typeof input !== 'object') throw new Error('映射配置无效');
+  if (!input.destination || !path.isAbsolute(input.destination)) throw new Error('请选择有效的输出目录');
+  return {
+    name: String(input.name || '未命名映射').trim().slice(0, 80) || '未命名映射',
+    destination: path.resolve(input.destination),
+    extensions: Array.isArray(input.extensions) ? [...new Set(input.extensions.map((item) => String(item).toLowerCase()))] : [],
+    startDate: input.startDate || '',
+    endDate: input.endDate || ''
+  };
 }
 
 function state() {
@@ -80,13 +103,41 @@ ipcMain.handle('media:scan', async (_event, source) => {
   const files = await walkMedia(source);
   const existing = new Map(catalog.files.map((file) => [file.path, file]));
   for (const file of files) existing.set(file.path, file);
-  catalog = { version: 1, files: [...existing.values()], lastScan: new Date().toISOString(), source };
+  catalog = { ...catalog, version: 2, files: [...existing.values()], lastScan: new Date().toISOString(), source };
   await saveCatalog();
   return state();
 });
 ipcMain.handle('library:create', async (_event, options) => createVirtualLibrary(catalog.files, options));
+ipcMain.handle('mapping:save', async (_event, input) => {
+  const values = validateMapping(input);
+  const now = new Date().toISOString();
+  const existingIndex = input.id ? catalog.mappings.findIndex((item) => item.id === input.id) : -1;
+  const mapping = existingIndex >= 0
+    ? { ...catalog.mappings[existingIndex], ...values, updatedAt: now }
+    : { id: crypto.randomUUID(), ...values, createdAt: now, updatedAt: now, lastRun: null };
+  if (existingIndex >= 0) catalog.mappings[existingIndex] = mapping;
+  else catalog.mappings.push(mapping);
+  await saveCatalog();
+  return { state: state(), mapping };
+});
+ipcMain.handle('mapping:run', async (_event, id) => {
+  const mapping = catalog.mappings.find((item) => item.id === id);
+  if (!mapping) throw new Error('找不到该映射');
+  const result = await createVirtualLibrary(catalog.files, mapping);
+  mapping.lastRun = {
+    at: new Date().toISOString(), total: result.total, linked: result.linked, failed: result.failures.length
+  };
+  mapping.updatedAt = new Date().toISOString();
+  await saveCatalog();
+  return { state: state(), result };
+});
+ipcMain.handle('mapping:delete', async (_event, id) => {
+  catalog.mappings = catalog.mappings.filter((item) => item.id !== id);
+  await saveCatalog();
+  return state();
+});
 ipcMain.handle('catalog:clear', async () => {
-  catalog = { version: 1, files: [], lastScan: null, source: null };
+  catalog = { ...catalog, version: 2, files: [], lastScan: null, source: null };
   await saveCatalog();
   return state();
 });

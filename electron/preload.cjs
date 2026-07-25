@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld('materialGater', {
   chooseDirectory: (title) => ipcRenderer.invoke('dialog:directory', title),
   scan: (source) => ipcRenderer.invoke('media:scan', source),
   createLibrary: (options) => ipcRenderer.invoke('library:create', options),
+  saveMapping: (mapping) => ipcRenderer.invoke('mapping:save', mapping),
+  runMapping: (id) => ipcRenderer.invoke('mapping:run', id),
+  deleteMapping: (id) => ipcRenderer.invoke('mapping:delete', id),
   clearCatalog: () => ipcRenderer.invoke('catalog:clear'),
   openPath: (target) => ipcRenderer.invoke('path:open', target),
   onDrivesChanged: (callback) => {
