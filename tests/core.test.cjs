@@ -95,8 +95,10 @@ test('copy templates, filters and resumable local writes', async (t) => {
   assert.equal((await fs.stat(destination)).size, content.length);
   assert.equal(transferred, content.length - 512 * 1024);
   const file = { id: '1', extension: '.mov', capturedAt: '2026-07-26T08:09:10.000Z' };
+  const otherFile = { id: '2', extension: '.mov', capturedAt: '2026-07-26T08:09:11.000Z' };
   assert.match(expandPathTemplate('%day/%note("悟3")/%time', file), /^2026-07-26[/\\]悟3[/\\]/);
   assert.equal(selectFiles([file], { extensions: ['.mov'], startDate: '2026-07-26', endDate: '2026-07-26' }).length, 1);
+  assert.deepEqual(selectFiles([file, otherFile], { fileIds: ['1'] }).map((item) => item.id), ['1']);
 });
 
 test('copy manager completes and persists a background task', async (t) => {

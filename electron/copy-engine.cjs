@@ -87,7 +87,7 @@ class CopyManager extends EventEmitter {
     if (!selected.length) throw new Error('没有选择需要拷贝的素材');
     const repository = this.resolveRepository(input.repositoryId);
     if (!repository) throw new Error('找不到目标储存库');
-    if (['local', 'usb'].includes(repository.type) && (!repository.root || !path.isAbsolute(repository.root))) throw new Error('储存库目录无效');
+    if (repository.type === 'local' && (!repository.root || !path.isAbsolute(repository.root))) throw new Error('储存库目录无效');
     const used = new Map();
     const items = selected.map((file) => {
       const folder = expandPathTemplate(input.pathTemplate, file, input.note);

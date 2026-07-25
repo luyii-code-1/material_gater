@@ -43,12 +43,20 @@ async function saveVault() { await atomicWrite(vaultPath, vault); }
 function migrateCatalog(stored) {
   const settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
   const sources = Array.isArray(stored.sources) ? stored.sources : [];
+  const repositories = Array.isArray(stored.repositories) ? stored.repositories.map((repository) => ({
+    ...repository,
+    type: repository.type === 'usb' ? 'local' : repository.type,
+    isDefault: Boolean(repository.isDefault),
+    defaultPathTemplate: repository.defaultPathTemplate || '%day/%note',
+    defaultMode: repository.defaultMode === 'original' ? 'original' : 'flat'
+  })) : [];
+  if (repositories.length && !repositories.some((repository) => repository.isDefault)) repositories[0].isDefault = true;
   return {
     version: 4,
     files: Array.isArray(stored.files) ? stored.files : [],
     sources,
     mappings: Array.isArray(stored.mappings) ? stored.mappings.map((mapping) => ({ ...mapping, source: mapping.source || stored.source || '', sourceUuid: mapping.sourceUuid || '' })) : [],
-    repositories: Array.isArray(stored.repositories) ? stored.repositories : [],
+    repositories,
     presets: Array.isArray(stored.presets) ? stored.presets : [],
     tasks: Array.isArray(stored.tasks) ? stored.tasks : [],
     settings,
@@ -251,11 +259,17 @@ function validateMapping(input) {
 }
 
 function validateRepository(input) {
-  const type = ['local', 'usb', 'smb', 'ftp', 'sftp'].includes(input?.type) ? input.type : 'local';
+  const type = ['local', 'smb', 'ftp', 'sftp'].includes(input?.type) ? input.type : 'local';
   if (!input?.name?.trim()) throw new Error('请输入储存库名称');
-  if (['local', 'usb'].includes(type) && (!input.root || !path.isAbsolute(input.root))) throw new Error('请选择储存库目录');
+  if (type === 'local' && (!input.root || !path.isAbsolute(input.root))) throw new Error('请选择储存库目录');
   if (['smb', 'ftp', 'sftp'].includes(type) && !input.address?.trim()) throw new Error('请输入远程地址');
-  return { name: input.name.trim().slice(0, 80), type, root: input.root || '', address: input.address?.trim() || '', remotePath: input.remotePath?.trim() || '', username: input.username?.trim() || '', domain: input.domain?.trim() || '', port: Number(input.port || 0) || null };
+  return {
+    name: input.name.trim().slice(0, 80), type, root: input.root || '', address: input.address?.trim() || '',
+    remotePath: input.remotePath?.trim() || '', username: input.username?.trim() || '', domain: input.domain?.trim() || '',
+    port: Number(input.port || 0) || null, isDefault: Boolean(input.isDefault),
+    defaultPathTemplate: String(input.defaultPathTemplate || '%day/%note').trim() || '%day/%note',
+    defaultMode: input.defaultMode === 'original' ? 'original' : 'flat'
+  };
 }
 
 async function storePassword(id, password) {
@@ -316,10 +330,18 @@ ipcMain.handle('mapping:run', async (_event, id) => {
   const result = await createVirtualLibrary(files, mapping); mapping.mounted = true; mapping.lastRun = { at: new Date().toISOString(), total: result.total, linked: result.linked, failed: result.failures.length }; await saveCatalog(); return { state: state(), result };
 });
 ipcMain.handle('mapping:delete', async (_event, request) => { const mapping = catalog.mappings.find((item) => item.id === request?.id); if (!mapping) throw new Error('找不到该映射'); const cleanup = request.cleanup ? await cleanupVirtualLibrary(mapping.destination, mapping.id) : null; catalog.mappings = catalog.mappings.filter((item) => item.id !== mapping.id); await saveCatalog(); return { state: state(), cleanup }; });
-ipcMain.handle('repository:save', async (_event, input) => { const values = validateRepository(input); const index = input.id ? catalog.repositories.findIndex((item) => item.id === input.id) : -1; const repository = index >= 0 ? { ...catalog.repositories[index], ...values } : { id: crypto.randomUUID(), ...values, createdAt: new Date().toISOString() }; if (index >= 0) catalog.repositories[index] = repository; else catalog.repositories.push(repository); await storePassword(repository.id, input.password); await saveCatalog(); return state(); });
+ipcMain.handle('repository:save', async (_event, input) => {
+  const values = validateRepository(input);
+  const index = input.id ? catalog.repositories.findIndex((item) => item.id === input.id) : -1;
+  const repository = index >= 0 ? { ...catalog.repositories[index], ...values } : { id: crypto.randomUUID(), ...values, createdAt: new Date().toISOString() };
+  if (values.isDefault) catalog.repositories.forEach((item) => { item.isDefault = false; });
+  if (index >= 0) catalog.repositories[index] = repository; else catalog.repositories.push(repository);
+  if (!catalog.repositories.some((item) => item.isDefault)) repository.isDefault = true;
+  await storePassword(repository.id, input.password); await saveCatalog(); return state();
+});
 ipcMain.handle('repository:test', async (_event, input) => {
   const repository = { id: input.id || 'test', ...validateRepository(input) };
-  if (['local', 'usb'].includes(repository.type) || repository.root) {
+  if (repository.type === 'local' || repository.root) {
     await fsp.access(repository.root, fs.constants.R_OK | fs.constants.W_OK);
     return { ok: true, message: '目录可读写' };
   }
@@ -327,8 +349,14 @@ ipcMain.handle('repository:test', async (_event, input) => {
   await session.close();
   return { ok: true, message: `${repository.type.toUpperCase()} 连接成功` };
 });
-ipcMain.handle('repository:delete', async (_event, id) => { catalog.repositories = catalog.repositories.filter((item) => item.id !== id); delete vault[id]; await Promise.all([saveCatalog(), saveVault()]); return state(); });
+ipcMain.handle('repository:delete', async (_event, id) => {
+  const wasDefault = catalog.repositories.find((item) => item.id === id)?.isDefault;
+  catalog.repositories = catalog.repositories.filter((item) => item.id !== id);
+  if (wasDefault && catalog.repositories[0]) catalog.repositories[0].isDefault = true;
+  delete vault[id]; await Promise.all([saveCatalog(), saveVault()]); return state();
+});
 ipcMain.handle('preset:save', async (_event, input) => { const preset = { ...input, id: input.id || crypto.randomUUID(), updatedAt: new Date().toISOString() }; const index = catalog.presets.findIndex((item) => item.id === preset.id); if (index >= 0) catalog.presets[index] = preset; else catalog.presets.push(preset); await saveCatalog(); return state(); });
+ipcMain.handle('preset:delete', async (_event, id) => { catalog.presets = catalog.presets.filter((item) => item.id !== id); await saveCatalog(); return state(); });
 ipcMain.handle('copy:create', async (_event, input) => { const files = catalog.files.filter((file) => file.sourceUuid === input.sourceUuid); const task = await copyManager.create(input, files); return { state: state(), task }; });
 ipcMain.handle('copy:pause', async (_event, id) => { await copyManager.pause(id); return state(); });
 ipcMain.handle('copy:resume', async (_event, id) => { void copyManager.resume(id); return state(); });

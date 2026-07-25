@@ -71,12 +71,14 @@ async function listDrives(platform = process.platform) {
       try {
         const stat = await fsp.stat(mount);
         if (!stat.isDirectory() || name === 'Macintosh HD') continue;
-        let device = ''; let uuid = '';
+        let device = ''; let uuid = ''; let protocol = '';
         try {
           const { stdout } = await execFileAsync('/usr/sbin/diskutil', ['info', mount]);
           device = stdout.match(/Part of Whole:\s+(disk\d+)/)?.[1] || stdout.match(/Device Identifier:\s+(disk\d+)/)?.[1] || '';
           uuid = stdout.match(/Volume UUID:\s+([A-Fa-f0-9-]+)/)?.[1]?.toUpperCase() || stdout.match(/Disk \/ Partition UUID:\s+([A-Fa-f0-9-]+)/)?.[1]?.toUpperCase() || '';
+          protocol = stdout.match(/Protocol:\s+(.+)/)?.[1]?.trim() || '';
         } catch { /* volume may have disappeared */ }
+        if (/disk image/i.test(protocol)) continue;
         results.push({ id: uuid || mount, uuid: uuid || mount, name, path: mount, device, kind: /sd|card|untitled/i.test(name) ? 'SD' : '外置磁盘' });
       } catch { /* disappeared */ }
     }

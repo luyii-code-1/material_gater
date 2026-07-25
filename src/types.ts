@@ -13,9 +13,17 @@ export type MappingProfile = {
   lastRun: null | { at: string; total: number; linked: number; failed: number };
 };
 export type MappingInput = Pick<MappingProfile, 'name' | 'source' | 'sourceUuid' | 'destination' | 'extensions' | 'startDate' | 'endDate'> & { id?: string };
-export type RepositoryType = 'local' | 'usb' | 'smb' | 'ftp' | 'sftp';
-export type Repository = { id: string; name: string; type: RepositoryType; root: string; address: string; remotePath: string; username: string; domain: string; port: number | null; hasPassword: boolean };
-export type CopyPreset = { id: string; name: string; extensions: string[]; startDate: string; endDate: string; dateMode?: 'fixed' | 'today'; repositoryId: string; pathTemplate: string; note: string; mode: 'flat' | 'original'; updatedAt: string };
+export type RepositoryType = 'local' | 'smb' | 'ftp' | 'sftp';
+export type Repository = {
+  id: string; name: string; type: RepositoryType; root: string; address: string; remotePath: string;
+  username: string; domain: string; port: number | null; hasPassword: boolean; isDefault: boolean;
+  defaultPathTemplate: string; defaultMode: 'flat' | 'original';
+};
+export type CopyPreset = {
+  id: string; name: string; extensions: string[]; startDate: string; endDate: string;
+  dateMode?: 'fixed' | 'today' | 'all'; repositoryId: string; destinationMode?: 'default' | 'custom';
+  pathTemplate: string; note: string; mode: 'flat' | 'original'; updatedAt: string;
+};
 export type CopyFileState = { id: string; source: string; relative: string; size: number; copied: number; status: string; error: string };
 export type CopyTask = { id: string; name: string; repositoryId: string; sourceUuid: string; status: 'queued' | 'running' | 'paused' | 'completed' | 'failed'; totalBytes: number; copiedBytes: number; speed: number; eta: number | null; history: number[]; files: CopyFileState[]; error?: string; createdAt: string; updatedAt: string };
 export type Settings = { foregroundScanMs: number; backgroundScanMs: number; askBeforeScan: boolean; notifications: boolean; keepRunning: boolean };
@@ -39,7 +47,7 @@ declare global {
       deleteMapping(request: { id: string; cleanup: boolean }): Promise<{ state: AppState; cleanup: null | { removed: number; kept: boolean; message: string } }>;
       saveRepository(repository: Partial<Repository> & { name: string; type: RepositoryType; password?: string }): Promise<AppState>;
       testRepository(repository: Partial<Repository> & { name: string; type: RepositoryType; password?: string }): Promise<{ ok: boolean; message: string }>;
-      deleteRepository(id: string): Promise<AppState>; savePreset(preset: Partial<CopyPreset>): Promise<AppState>;
+      deleteRepository(id: string): Promise<AppState>; savePreset(preset: Partial<CopyPreset>): Promise<AppState>; deletePreset(id: string): Promise<AppState>;
       createCopyTask(input: CopyRequest): Promise<{ state: AppState; task: CopyTask }>;
       pauseCopyTask(id: string): Promise<AppState>; resumeCopyTask(id: string): Promise<AppState>; saveSettings(settings: Partial<Settings>): Promise<AppState>;
       clearCatalog(): Promise<AppState>; openPath(target: string): Promise<string>;

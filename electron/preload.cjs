@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('materialGater', {
   testRepository: (repository) => ipcRenderer.invoke('repository:test', repository),
   deleteRepository: (id) => ipcRenderer.invoke('repository:delete', id),
   savePreset: (preset) => ipcRenderer.invoke('preset:save', preset),
+  deletePreset: (id) => ipcRenderer.invoke('preset:delete', id),
   createCopyTask: (input) => ipcRenderer.invoke('copy:create', input),
   pauseCopyTask: (id) => ipcRenderer.invoke('copy:pause', id),
   resumeCopyTask: (id) => ipcRenderer.invoke('copy:resume', id),
