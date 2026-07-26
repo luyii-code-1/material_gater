@@ -41,6 +41,7 @@ pub struct Drive {
     pub free: u64,
     pub read_bps: f64,
     pub write_bps: f64,
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -52,6 +53,7 @@ pub struct SourceRecord {
     pub last_seen: String,
     pub online: bool,
     pub external: bool,
+    pub repository_only: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -74,6 +76,8 @@ pub struct MappingProfile {
     pub extensions: Vec<String>,
     pub start_date: String,
     pub end_date: String,
+    pub mode: String,
+    pub group_by_day: bool,
     pub created_at: String,
     pub updated_at: String,
     pub mounted: bool,
@@ -92,6 +96,8 @@ pub struct MappingInput {
     pub extensions: Vec<String>,
     pub start_date: String,
     pub end_date: String,
+    pub mode: String,
+    pub group_by_day: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -160,6 +166,9 @@ pub struct CopyFileState {
     pub copied: u64,
     pub status: String,
     pub error: String,
+    pub source_hash: String,
+    pub verify_status: String,
+    pub verify_error: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -175,6 +184,12 @@ pub struct CopyTask {
     pub speed: f64,
     pub eta: Option<u64>,
     pub history: Vec<f64>,
+    pub verify_status: String,
+    pub verified_bytes: u64,
+    pub verify_speed: f64,
+    pub verify_eta: Option<u64>,
+    pub verify_history: Vec<f64>,
+    pub verify_error: String,
     pub files: Vec<CopyFileState>,
     pub error: String,
     pub path_template: String,
@@ -264,7 +279,7 @@ pub struct Catalog {
 impl Default for Catalog {
     fn default() -> Self {
         Self {
-            version: 5,
+            version: 7,
             files: vec![],
             sources: vec![],
             mappings: vec![],
@@ -332,6 +347,21 @@ pub struct LibraryOptions {
     pub extensions: Vec<String>,
     pub start_date: String,
     pub end_date: String,
+    pub mode: String,
+    pub group_by_day: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DriveHealth {
+    pub uuid: String,
+    pub smart_status: String,
+    pub temperature_c: Option<f64>,
+    pub bytes_read: Option<u64>,
+    pub bytes_written: Option<u64>,
+    pub power_on_hours: Option<u64>,
+    pub protocol: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -347,4 +377,22 @@ pub struct DriveIo {
     pub id: String,
     pub read_bps: f64,
     pub write_bps: f64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ThumbnailResult {
+    pub source: String,
+    pub cache_path: String,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StatsExportRequest {
+    pub destination: String,
+    pub source_uuid: String,
+    pub extension: String,
+    pub start_date: String,
+    pub end_date: String,
 }

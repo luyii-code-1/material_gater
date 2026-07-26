@@ -2,6 +2,9 @@ use crate::models::BackgroundTask;
 use crate::storage::RuntimeState;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -26,11 +29,21 @@ pub fn begin_scan(
     title: String,
     detail: String,
 ) -> Result<(BackgroundTask, bool)> {
+    begin(app, key, "scan", title, detail)
+}
+
+pub fn begin(
+    app: &AppHandle,
+    key: &str,
+    kind: &str,
+    title: String,
+    detail: String,
+) -> Result<(BackgroundTask, bool)> {
     let state = app.state::<RuntimeState>();
     let mut active = state
         .active_scans
         .lock()
-        .map_err(|_| anyhow!("扫描任务锁已损坏"))?;
+        .map_err(|_| anyhow!("后台任务锁已损坏"))?;
     if let Some(id) = active.get(key)
         && let Some(task) = state
             .background_tasks
@@ -44,7 +57,7 @@ pub fn begin_scan(
     let now = Utc::now().to_rfc3339();
     let task = BackgroundTask {
         id: Uuid::new_v4().to_string(),
-        kind: "scan".into(),
+        kind: kind.into(),
         title,
         detail,
         status: "running".into(),
@@ -55,16 +68,40 @@ pub fn begin_scan(
         updated_at: now,
     };
     active.insert(key.into(), task.id.clone());
+    state
+        .background_pauses
+        .write()
+        .map_err(|_| anyhow!("后台任务控制锁已损坏"))?
+        .insert(task.id.clone(), Arc::new(AtomicBool::new(false)));
     let mut tasks = state
         .background_tasks
         .write()
         .map_err(|_| anyhow!("后台任务锁已损坏"))?;
     tasks.insert(0, task.clone());
-    tasks.truncate(24);
+    tasks.truncate(48);
     drop(tasks);
     drop(active);
     emit(app);
     Ok((task, true))
+}
+
+pub fn checkpoint(app: &AppHandle, id: &str) -> Result<()> {
+    loop {
+        let control = app
+            .state::<RuntimeState>()
+            .background_pauses
+            .read()
+            .map_err(|_| anyhow!("后台任务控制锁已损坏"))?
+            .get(id)
+            .cloned();
+        let Some(control) = control else {
+            return Err(anyhow!("后台任务已结束"));
+        };
+        if !control.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
 }
 
 pub fn update(
@@ -92,12 +129,105 @@ pub fn update(
     emit(app);
 }
 
+pub fn pause(app: &AppHandle, id: &str) -> Result<()> {
+    let state = app.state::<RuntimeState>();
+    let control = state
+        .background_pauses
+        .read()
+        .map_err(|_| anyhow!("后台任务控制锁已损坏"))?
+        .get(id)
+        .cloned()
+        .ok_or_else(|| anyhow!("任务已经结束"))?;
+    control.store(true, Ordering::Relaxed);
+    if let Ok(mut tasks) = state.background_tasks.write()
+        && let Some(task) = tasks.iter_mut().find(|task| task.id == id)
+    {
+        task.status = "paused".into();
+        task.updated_at = Utc::now().to_rfc3339();
+    }
+    emit(app);
+    Ok(())
+}
+
+pub fn resume(app: &AppHandle, id: &str) -> Result<()> {
+    let state = app.state::<RuntimeState>();
+    let control = state
+        .background_pauses
+        .read()
+        .map_err(|_| anyhow!("后台任务控制锁已损坏"))?
+        .get(id)
+        .cloned()
+        .ok_or_else(|| anyhow!("任务已经结束"))?;
+    control.store(false, Ordering::Relaxed);
+    if let Ok(mut tasks) = state.background_tasks.write()
+        && let Some(task) = tasks.iter_mut().find(|task| task.id == id)
+    {
+        task.status = "running".into();
+        task.updated_at = Utc::now().to_rfc3339();
+    }
+    emit(app);
+    Ok(())
+}
+
+pub fn clear_completed(app: &AppHandle) -> Result<Vec<BackgroundTask>> {
+    let state = app.state::<RuntimeState>();
+    let remaining = {
+        let mut tasks = state
+            .background_tasks
+            .write()
+            .map_err(|_| anyhow!("后台任务锁已损坏"))?;
+        tasks.retain(|task| task.status != "completed" && task.status != "cancelled");
+        tasks.clone()
+    };
+    emit(app);
+    Ok(remaining)
+}
+
+pub fn cancel_key(app: &AppHandle, key: &str) -> Result<Vec<BackgroundTask>> {
+    let state = app.state::<RuntimeState>();
+    let id = state
+        .active_scans
+        .lock()
+        .map_err(|_| anyhow!("后台任务锁已损坏"))?
+        .remove(key)
+        .ok_or_else(|| anyhow!("该素材源当前没有索引任务"))?;
+    if let Ok(mut controls) = state.background_pauses.write() {
+        controls.remove(&id);
+    }
+    if let Ok(mut tasks) = state.background_tasks.write()
+        && let Some(task) = tasks.iter_mut().find(|task| task.id == id)
+    {
+        task.status = "cancelled".into();
+        task.detail = "用户已取消索引".into();
+        task.updated_at = Utc::now().to_rfc3339();
+    }
+    emit(app);
+    list(&state)
+}
+
 fn finish(app: &AppHandle, id: &str, key: &str, status: &str, error: String) {
     let state = app.state::<RuntimeState>();
+    if state
+        .background_tasks
+        .read()
+        .ok()
+        .and_then(|tasks| {
+            tasks
+                .iter()
+                .find(|task| task.id == id)
+                .map(|task| task.status.clone())
+        })
+        .is_some_and(|value| value == "cancelled")
+    {
+        return;
+    }
     if let Ok(mut active) = state.active_scans.lock()
         && active.get(key).is_some_and(|active_id| active_id == id)
     {
         active.remove(key);
+    }
+    if let Ok(mut controls) = state.background_pauses.write() {
+        controls.remove(id);
     }
     if let Ok(mut tasks) = state.background_tasks.write()
         && let Some(task) = tasks.iter_mut().find(|task| task.id == id)

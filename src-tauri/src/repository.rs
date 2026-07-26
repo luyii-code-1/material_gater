@@ -6,10 +6,10 @@ use remotefs_ssh::{NoCheckServerKey, RusshSession, SftpFs, SshOpts};
 use smb2::{ClientConfig, SmbClient};
 use std::collections::HashMap;
 use std::fs::File as StdFile;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, SeekFrom};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom as AsyncSeekFrom};
@@ -295,6 +295,103 @@ where
     client.rename(&mut tree, &partial, &final_path).await?;
     client.disconnect_share(&tree).await?;
     Ok(false)
+}
+
+struct HashWriter<F> {
+    hasher: Arc<Mutex<blake3::Hasher>>,
+    pause: Arc<AtomicBool>,
+    read: u64,
+    progress: F,
+}
+
+impl<F: FnMut(u64) -> Result<()> + Send> Write for HashWriter<F> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.pause.load(Ordering::Relaxed) {
+            return Err(IoError::new(IoErrorKind::Interrupted, "任务已暂停"));
+        }
+        self.hasher
+            .lock()
+            .map_err(|_| IoError::other("校验器锁已损坏"))?
+            .update(buffer);
+        self.read += buffer.len() as u64;
+        (self.progress)(self.read).map_err(IoError::other)?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub fn hash_remote_fs<F>(
+    repository: &Repository,
+    password: &str,
+    relative: &str,
+    pause: Arc<AtomicBool>,
+    progress: F,
+) -> Result<String>
+where
+    F: FnMut(u64) -> Result<()> + Send + 'static,
+{
+    let mut client = match repository.repository_type.as_str() {
+        "ftp" => ftp_client(repository, password),
+        "sftp" => sftp_client(repository, password)?,
+        _ => bail!("不是 FTP/SFTP 储存库"),
+    };
+    client.connect().context("远程服务器鉴权失败")?;
+    let hasher = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let writer = HashWriter {
+        hasher: hasher.clone(),
+        pause,
+        read: 0,
+        progress,
+    };
+    let result = client.open_file(
+        &remote_join(&repository.remote_path, relative),
+        Box::new(writer),
+    );
+    let _ = client.disconnect();
+    result.context("无法读取远程文件进行校验")?;
+    let hash = hasher
+        .lock()
+        .map_err(|_| anyhow::anyhow!("校验器锁已损坏"))?
+        .finalize()
+        .to_hex()
+        .to_string();
+    Ok(hash)
+}
+
+pub async fn hash_smb<F>(
+    repository: &Repository,
+    password: &str,
+    relative: &str,
+    pause: Arc<AtomicBool>,
+    mut progress: F,
+) -> Result<String>
+where
+    F: FnMut(u64) -> Result<()>,
+{
+    let (mut client, tree) = smb_client(repository, password).await?;
+    let reader = client
+        .open_file_reader(&tree, &smb_path(repository, relative))
+        .await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut offset = 0_u64;
+    while offset < reader.size() {
+        if pause.load(Ordering::Relaxed) {
+            bail!("任务已暂停");
+        }
+        let chunk = reader.read_at(offset, 4 * 1024 * 1024).await?;
+        if chunk.is_empty() {
+            break;
+        }
+        hasher.update(&chunk);
+        offset += chunk.len() as u64;
+        progress(offset)?;
+    }
+    reader.close().await?;
+    client.disconnect_share(&tree).await?;
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 pub async fn test_repository(repository: &Repository, password: &str) -> Result<String> {

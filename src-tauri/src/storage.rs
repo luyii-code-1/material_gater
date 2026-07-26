@@ -1,7 +1,7 @@
 use crate::models::{AppState, BackgroundTask, Catalog, Drive, Stats, StatsBucket};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ pub const SERVICE_NAME: &str = "com.materialgater.app";
 
 pub struct RuntimeState {
     pub catalog: RwLock<Catalog>,
+    pub catalog_save: Mutex<()>,
     pub drives: RwLock<Vec<Drive>>,
     pub data_dir: PathBuf,
     pub pauses: RwLock<HashMap<String, Arc<AtomicBool>>>,
@@ -24,12 +25,19 @@ pub struct RuntimeState {
     pub scan_debounces: Mutex<HashMap<String, Instant>>,
     pub background_tasks: RwLock<Vec<BackgroundTask>>,
     pub active_scans: Mutex<HashMap<String, String>>,
+    pub background_pauses: RwLock<HashMap<String, Arc<AtomicBool>>>,
+    pub thumbnail_paused: Arc<AtomicBool>,
+    pub thumbnail_worker: AtomicBool,
+    pub thumbnail_queue: Mutex<VecDeque<String>>,
+    pub thumbnail_requested: Mutex<HashSet<String>>,
+    pub thumbnail_task: Mutex<Option<String>>,
 }
 
 impl RuntimeState {
     pub fn new(catalog: Catalog, data_dir: PathBuf) -> Self {
         Self {
             catalog: RwLock::new(catalog),
+            catalog_save: Mutex::new(()),
             drives: RwLock::new(vec![]),
             data_dir,
             pauses: RwLock::new(HashMap::new()),
@@ -40,6 +48,12 @@ impl RuntimeState {
             scan_debounces: Mutex::new(HashMap::new()),
             background_tasks: RwLock::new(vec![]),
             active_scans: Mutex::new(HashMap::new()),
+            background_pauses: RwLock::new(HashMap::new()),
+            thumbnail_paused: Arc::new(AtomicBool::new(false)),
+            thumbnail_worker: AtomicBool::new(false),
+            thumbnail_queue: Mutex::new(VecDeque::new()),
+            thumbnail_requested: Mutex::new(HashSet::new()),
+            thumbnail_task: Mutex::new(None),
         }
     }
 }
@@ -101,7 +115,12 @@ pub fn load_catalog(app: &AppHandle, data_dir: &Path) -> Result<Catalog> {
         Ok(text) => serde_json::from_str::<Catalog>(&text).unwrap_or_default(),
         Err(_) => Catalog::default(),
     };
-    catalog.version = 5;
+    catalog.version = 7;
+    for mapping in &mut catalog.mappings {
+        if mapping.mode != "original" {
+            mapping.mode = "flat".into();
+        }
+    }
     for repository in &mut catalog.repositories {
         if repository.repository_type == "usb" {
             repository.repository_type = "local".into();
@@ -125,12 +144,27 @@ pub fn load_catalog(app: &AppHandle, data_dir: &Path) -> Result<Catalog> {
         if task.status == "running" || task.status == "queued" {
             task.status = "paused".into();
         }
+        if task.verify_status == "running" || task.verify_status == "queued" {
+            task.verify_status = "paused".into();
+        }
+        for file in &mut task.files {
+            if file.status == "copying" || file.status == "hashing" {
+                file.status = "queued".into();
+            }
+            if file.verify_status == "verifying" {
+                file.verify_status = "queued".into();
+            }
+        }
     }
     save_catalog_to(data_dir, &catalog)?;
     Ok(catalog)
 }
 
 pub fn save_catalog(state: &RuntimeState) -> Result<()> {
+    let _save = state
+        .catalog_save
+        .lock()
+        .map_err(|_| anyhow::anyhow!("素材库保存锁已损坏"))?;
     let catalog = state
         .catalog
         .read()

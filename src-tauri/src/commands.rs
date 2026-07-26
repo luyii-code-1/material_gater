@@ -1,19 +1,22 @@
 use crate::copy_engine::{build_task, pause_task, start_task};
 use crate::media::{
-    cleanup_virtual_library, create_virtual_library, list_directory as read_directory,
+    cleanup_virtual_library, create_virtual_library, list_directory as read_directory, list_drives,
     walk_media_with_progress,
 };
 use crate::models::{
     AppState, BackgroundTask, CopyPreset, CopyRequest, DeleteMappingRequest, DirectoryEntry, Drive,
-    LibraryOptions, MappingInput, MappingProfile, MappingRun, Repository, RepositoryInput,
-    SettingsPatch, SourceRecord,
+    DriveHealth, LibraryOptions, MappingInput, MappingProfile, MappingRun, Repository,
+    RepositoryInput, SettingsPatch, SourceRecord, StatsExportRequest, ThumbnailResult,
 };
 use crate::repository;
-use crate::storage::{RuntimeState, delete_password, save_catalog, snapshot, store_password};
+use crate::storage::{
+    RuntimeState, delete_password, save_catalog, snapshot, store_password, summarize,
+};
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Local, Utc};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 use tauri::menu::MenuBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -38,10 +41,228 @@ pub fn get_drives(state: State<'_, RuntimeState>) -> std::result::Result<Vec<Dri
 }
 
 #[tauri::command]
+pub fn refresh_drives(app: AppHandle) -> std::result::Result<Vec<Drive>, String> {
+    command_result((|| {
+        let drives = list_drives();
+        *app.state::<RuntimeState>()
+            .drives
+            .write()
+            .map_err(|_| anyhow::anyhow!("磁盘状态锁已损坏"))? = drives.clone();
+        let _ = app.emit("drives-changed", &drives);
+        Ok(drives)
+    })())
+}
+
+fn info_value(output: &str, label: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == label).then(|| value.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn get_drive_health(
+    state: State<'_, RuntimeState>,
+    uuid: String,
+) -> std::result::Result<DriveHealth, String> {
+    command_result((|| {
+        let drive = state
+            .drives
+            .read()
+            .map_err(|_| anyhow::anyhow!("磁盘状态锁已损坏"))?
+            .iter()
+            .find(|drive| drive.uuid == uuid)
+            .cloned()
+            .context("素材源已离线")?;
+        let counters = state
+            .io_counters
+            .read()
+            .ok()
+            .and_then(|values| values.get(&drive.device).copied());
+        let mut health = DriveHealth {
+            uuid,
+            bytes_read: counters.map(|value| value.0),
+            bytes_written: counters.map(|value| value.1),
+            ..DriveHealth::default()
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let output = Command::new("/usr/sbin/diskutil")
+                .args(["info", &drive.path])
+                .output()
+                .context("无法读取磁盘信息")?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            health.smart_status = info_value(&text, "SMART Status");
+            health.protocol = info_value(&text, "Protocol");
+            let smartctl = ["/opt/homebrew/sbin/smartctl", "/usr/local/sbin/smartctl"]
+                .into_iter()
+                .find(|path| Path::new(path).is_file());
+            if let Some(smartctl) = smartctl {
+                let device = format!("/dev/{}", drive.device);
+                if let Ok(output) = Command::new(smartctl).args(["-a", "-j", &device]).output()
+                    && let Ok(value) = serde_json::from_slice::<Value>(&output.stdout)
+                {
+                    health.temperature_c = value
+                        .pointer("/temperature/current")
+                        .and_then(Value::as_f64);
+                    health.power_on_hours = value
+                        .pointer("/power_on_time/hours")
+                        .and_then(Value::as_u64);
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            health.protocol = drive.kind.clone();
+            health.smart_status = "由 Windows 管理".into();
+        }
+        health.message = if health.smart_status.is_empty() {
+            "系统未通过当前连接协议提供 SMART 状态".into()
+        } else {
+            format!("SMART {}", health.smart_status)
+        };
+        Ok(health)
+    })())
+}
+
+#[tauri::command]
+pub fn cancel_source_index(
+    app: AppHandle,
+    uuid: String,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result(crate::tasks::cancel_key(&app, &uuid))
+}
+
+#[tauri::command]
+pub fn set_source_repository(
+    app: AppHandle,
+    uuid: String,
+    repository_only: bool,
+) -> std::result::Result<AppState, String> {
+    command_result((|| {
+        let state = app.state::<RuntimeState>();
+        let drive = state
+            .drives
+            .read()
+            .map_err(|_| anyhow::anyhow!("磁盘状态锁已损坏"))?
+            .iter()
+            .find(|drive| drive.uuid == uuid)
+            .cloned()
+            .context("素材源已离线")?;
+        let _ = crate::tasks::cancel_key(&app, &uuid);
+        if let Ok(mut watchers) = state.source_watchers.lock() {
+            watchers.remove(&uuid);
+        }
+        {
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            update_source(&mut catalog, &drive);
+            if let Some(source) = catalog.sources.iter_mut().find(|item| item.uuid == uuid) {
+                source.repository_only = repository_only;
+            }
+            if repository_only {
+                catalog.files.retain(|file| file.source_uuid != uuid);
+                for mapping in catalog
+                    .mappings
+                    .iter_mut()
+                    .filter(|mapping| mapping.source_uuid == uuid)
+                {
+                    let _ = cleanup_virtual_library(&mapping.destination, &mapping.id);
+                    mapping.mounted = false;
+                    mapping.mount_error = "素材源已标记为储存盘".into();
+                }
+            }
+        }
+        save_catalog(&state)?;
+        let next = snapshot(&state)?;
+        let _ = app.emit("state-changed", &next);
+        Ok(next)
+    })())
+}
+
+#[tauri::command]
+pub fn eject_drive(app: AppHandle, uuid: String) -> std::result::Result<(), String> {
+    command_result((|| {
+        let drive = app
+            .state::<RuntimeState>()
+            .drives
+            .read()
+            .map_err(|_| anyhow::anyhow!("磁盘状态锁已损坏"))?
+            .iter()
+            .find(|drive| drive.uuid == uuid)
+            .cloned()
+            .context("素材源已离线")?;
+        #[cfg(target_os = "macos")]
+        let status = Command::new("/usr/sbin/diskutil")
+            .args(["eject", &format!("/dev/{}", drive.device)])
+            .status()
+            .context("无法卸载磁盘")?;
+        #[cfg(target_os = "windows")]
+        let status = Command::new("mountvol.exe")
+            .args([&drive.path, "/p"])
+            .status()
+            .context("无法卸载磁盘")?;
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        bail!("当前平台暂不支持卸载磁盘");
+        if !status.success() {
+            bail!("系统拒绝卸载，可能仍有文件正在使用");
+        }
+        Ok(())
+    })())
+}
+
+#[tauri::command]
 pub fn get_background_tasks(
     state: State<'_, RuntimeState>,
 ) -> std::result::Result<Vec<BackgroundTask>, String> {
     command_result(crate::tasks::list(&state))
+}
+
+#[tauri::command]
+pub fn pause_background_task(
+    app: AppHandle,
+    id: String,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result((|| {
+        crate::tasks::pause(&app, &id)?;
+        crate::tasks::list(&app.state::<RuntimeState>())
+    })())
+}
+
+#[tauri::command]
+pub fn resume_background_task(
+    app: AppHandle,
+    id: String,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result((|| {
+        crate::tasks::resume(&app, &id)?;
+        crate::tasks::list(&app.state::<RuntimeState>())
+    })())
+}
+
+#[tauri::command]
+pub fn clear_completed_background_tasks(
+    app: AppHandle,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result(crate::tasks::clear_completed(&app))
+}
+
+#[tauri::command]
+pub fn request_thumbnails(
+    app: AppHandle,
+    sources: Vec<String>,
+) -> std::result::Result<Vec<ThumbnailResult>, String> {
+    command_result(crate::thumbnails::request(&app, sources))
+}
+
+#[tauri::command]
+pub fn set_thumbnail_user_active(state: State<'_, RuntimeState>, active: bool) {
+    crate::thumbnails::set_user_active(&state, active);
 }
 
 fn resolve_drive(state: &RuntimeState, source: &str) -> Drive {
@@ -62,6 +283,7 @@ fn resolve_drive(state: &RuntimeState, source: &str) -> Drive {
                     .into(),
                 path: source.into(),
                 kind: "目录".into(),
+                active: Path::new(source).read_dir().is_ok(),
                 ..Drive::default()
             }
         })
@@ -100,6 +322,7 @@ fn update_source(catalog: &mut crate::models::Catalog, drive: &Drive) {
             last_seen: now,
             online: true,
             external: drive.kind == "目录",
+            repository_only: false,
         });
     }
     for mapping in &mut catalog.mappings {
@@ -117,6 +340,7 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
     let drive = resolve_drive(&state, source);
     let mut last_progress = Instant::now() - Duration::from_secs(1);
     let mut files = walk_media_with_progress(Path::new(&drive.path), &drive.uuid, |count| {
+        crate::tasks::checkpoint(app, task_id)?;
         if last_progress.elapsed() >= Duration::from_millis(120) {
             crate::tasks::update(
                 app,
@@ -128,6 +352,7 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
             );
             last_progress = Instant::now();
         }
+        Ok(())
     })?;
     let file_count = files.len();
     crate::tasks::update(
@@ -152,10 +377,13 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
             extensions: mapping.extensions.clone(),
             start_date: mapping.start_date.clone(),
             end_date: mapping.end_date.clone(),
+            mode: mapping.mode.clone(),
+            group_by_day: mapping.group_by_day,
         })
         .collect::<Vec<_>>();
     let mut mapping_results = Vec::with_capacity(mapping_options.len());
     for (index, options) in mapping_options.iter().enumerate() {
+        crate::tasks::checkpoint(app, task_id)?;
         crate::tasks::update(
             app,
             task_id,
@@ -229,6 +457,21 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
 fn queue_scan(app: &AppHandle, source: &str, quiet: bool) -> Result<BackgroundTask> {
     let state = app.state::<RuntimeState>();
     let drive = resolve_drive(&state, source);
+    if state
+        .catalog
+        .read()
+        .ok()
+        .and_then(|catalog| {
+            catalog
+                .sources
+                .iter()
+                .find(|item| item.uuid == drive.uuid)
+                .map(|item| item.repository_only)
+        })
+        .unwrap_or(false)
+    {
+        bail!("该磁盘已标记为储存盘，不执行扫描或索引");
+    }
     let (task, started) = crate::tasks::begin_scan(
         app,
         &drive.uuid,
@@ -318,6 +561,11 @@ fn validated_mapping(input: MappingInput, drives: &[Drive]) -> Result<MappingInp
             .into_iter()
             .map(|ext| ext.to_ascii_lowercase())
             .collect(),
+        mode: if input.mode == "original" {
+            "original".into()
+        } else {
+            "flat".into()
+        },
         ..input
     })
 }
@@ -356,6 +604,8 @@ pub fn save_mapping(
                 extensions: input.extensions,
                 start_date: input.start_date,
                 end_date: input.end_date,
+                mode: input.mode,
+                group_by_day: input.group_by_day,
                 created_at: previous
                     .as_ref()
                     .map(|value| value.created_at.clone())
@@ -420,6 +670,8 @@ pub fn run_mapping(
             extensions: mapping.extensions.clone(),
             start_date: mapping.start_date.clone(),
             end_date: mapping.end_date.clone(),
+            mode: mapping.mode.clone(),
+            group_by_day: mapping.group_by_day,
         };
         let result = create_virtual_library(&files, &options)?;
         {
@@ -727,6 +979,83 @@ pub fn resume_copy_task(app: AppHandle, id: String) -> std::result::Result<AppSt
 }
 
 #[tauri::command]
+pub fn clear_completed_copy_tasks(app: AppHandle) -> std::result::Result<AppState, String> {
+    command_result((|| {
+        let state = app.state::<RuntimeState>();
+        state
+            .catalog
+            .write()
+            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .tasks
+            .retain(|task| task.status != "completed");
+        save_catalog(&state)?;
+        let result = snapshot(&state)?;
+        let _ = app.emit("copy-changed", result.catalog.tasks.clone());
+        Ok(result)
+    })())
+}
+
+#[tauri::command]
+pub fn export_statistics(
+    state: State<'_, RuntimeState>,
+    request: StatsExportRequest,
+) -> std::result::Result<String, String> {
+    command_result((|| {
+        let destination = PathBuf::from(&request.destination);
+        if !destination.is_absolute() {
+            bail!("请选择有效的导出位置");
+        }
+        let files = state
+            .catalog
+            .read()
+            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .files
+            .iter()
+            .filter(|file| {
+                let day = DateTime::parse_from_rfc3339(&file.captured_at)
+                    .map(|value| value.with_timezone(&Local).format("%Y-%m-%d").to_string())
+                    .unwrap_or_default();
+                (request.source_uuid.is_empty() || file.source_uuid == request.source_uuid)
+                    && (request.extension.is_empty() || file.extension == request.extension)
+                    && (request.start_date.is_empty() || day >= request.start_date)
+                    && (request.end_date.is_empty() || day <= request.end_date)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let stats = summarize(&files);
+        let is_json = destination
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case("json"));
+        if is_json {
+            std::fs::write(
+                &destination,
+                serde_json::to_string_pretty(&json!({
+                    "exportedAt": Utc::now().to_rfc3339(),
+                    "filters": request,
+                    "stats": stats,
+                }))?,
+            )?;
+        } else {
+            let mut text = String::from("\u{feff}分类,项目,文件数,字节数\n");
+            text.push_str(&format!("汇总,全部,{},{}\n", stats.count, stats.size));
+            for (day, bucket) in &stats.by_day {
+                text.push_str(&format!("日期,{day},{},{}\n", bucket.count, bucket.size));
+            }
+            for (extension, bucket) in &stats.by_type {
+                text.push_str(&format!(
+                    "类型,{},{},{}\n",
+                    extension.trim_start_matches('.').to_ascii_uppercase(),
+                    bucket.count,
+                    bucket.size
+                ));
+            }
+            std::fs::write(&destination, text)?;
+        }
+        Ok(destination.to_string_lossy().into_owned())
+    })())
+}
+
+#[tauri::command]
 pub fn save_settings(
     state: State<'_, RuntimeState>,
     values: SettingsPatch,
@@ -801,10 +1130,34 @@ pub fn show_media_menu(
             .write()
             .map_err(|_| anyhow::anyhow!("菜单状态锁已损坏"))? = Some(target);
         let menu = MenuBuilder::new(&app)
+            .text("preview-media", "快速查看")
             .text("open-media", "打开")
             .text("reveal-media", "打开文件所在位置")
             .build()?;
         window.popup_menu(&menu)?;
+        Ok(())
+    })())
+}
+
+#[tauri::command]
+pub fn preview_media(target: String) -> std::result::Result<(), String> {
+    command_result((|| {
+        let path = PathBuf::from(target);
+        if !path.is_absolute() || !path.is_file() {
+            bail!("素材已离线或路径无效");
+        }
+        #[cfg(target_os = "macos")]
+        Command::new("/usr/bin/open")
+            .arg(&path)
+            .spawn()
+            .context("无法调用系统预览")?;
+        #[cfg(target_os = "windows")]
+        Command::new("explorer.exe")
+            .arg(&path)
+            .spawn()
+            .context("无法调用系统预览")?;
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        bail!("当前平台暂不支持系统预览");
         Ok(())
     })())
 }

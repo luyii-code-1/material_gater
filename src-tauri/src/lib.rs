@@ -6,6 +6,7 @@ mod models;
 mod repository;
 mod storage;
 mod tasks;
+mod thumbnails;
 
 use crate::storage::{RuntimeState, load_catalog, resolve_data_directory};
 use tauri::menu::MenuBuilder;
@@ -38,6 +39,7 @@ pub fn run() {
             let data_dir = resolve_data_directory(app.handle())?;
             let catalog = load_catalog(app.handle(), &data_dir)?;
             app.manage(RuntimeState::new(catalog, data_dir));
+            thumbnails::cleanup(&app.state::<RuntimeState>())?;
 
             app.on_menu_event(|app, event| {
                 let target = app
@@ -48,6 +50,9 @@ pub fn run() {
                     .and_then(|value| value.clone());
                 if let Some(target) = target {
                     match event.id().as_ref() {
+                        "preview-media" => {
+                            let _ = commands::preview_media(target.to_string_lossy().into_owned());
+                        }
                         "open-media" => {
                             let _ = app
                                 .opener()
@@ -118,7 +123,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_drives,
+            commands::refresh_drives,
+            commands::get_drive_health,
+            commands::cancel_source_index,
+            commands::set_source_repository,
+            commands::eject_drive,
             commands::get_background_tasks,
+            commands::pause_background_task,
+            commands::resume_background_task,
+            commands::clear_completed_background_tasks,
+            commands::request_thumbnails,
+            commands::set_thumbnail_user_active,
             commands::scan_media,
             commands::list_directory,
             commands::create_library,
@@ -133,10 +148,13 @@ pub fn run() {
             commands::create_copy_task,
             commands::pause_copy_task,
             commands::resume_copy_task,
+            commands::clear_completed_copy_tasks,
+            commands::export_statistics,
             commands::save_settings,
             commands::clear_catalog,
             commands::show_window,
             commands::show_media_menu,
+            commands::preview_media,
         ])
         .build(tauri::generate_context!())
         .expect("无法启动 Material Gater");

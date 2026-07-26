@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -99,13 +99,13 @@ fn stable_file_id(_path: &Path, metadata: &fs::Metadata) -> String {
 
 #[cfg(test)]
 pub fn walk_media(root: &Path, source_uuid: &str) -> Result<Vec<MediaFile>> {
-    walk_media_with_progress(root, source_uuid, |_| {})
+    walk_media_with_progress(root, source_uuid, |_| Ok(()))
 }
 
 pub fn walk_media_with_progress(
     root: &Path,
     source_uuid: &str,
-    mut progress: impl FnMut(usize),
+    mut progress: impl FnMut(usize) -> Result<()>,
 ) -> Result<Vec<MediaFile>> {
     let root =
         fs::canonicalize(root).with_context(|| format!("无法访问素材源：{}", root.display()))?;
@@ -145,16 +145,14 @@ pub fn walk_media_with_progress(
             source: root.to_string_lossy().into_owned(),
             source_uuid: source_uuid.into(),
         });
-        if files.len().is_multiple_of(256) {
-            progress(files.len());
-        }
+        progress(files.len())?;
     }
     files.sort_by(|a, b| {
         b.captured_at
             .cmp(&a.captured_at)
             .then_with(|| a.relative_path.cmp(&b.relative_path))
     });
-    progress(files.len());
+    progress(files.len())?;
     Ok(files)
 }
 
@@ -231,6 +229,17 @@ fn diskutil_value(output: &str, labels: &[&str]) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn diskutil_bytes(output: &str, labels: &[&str]) -> u64 {
+    let value = diskutil_value(output, labels);
+    value
+        .split('(')
+        .nth(1)
+        .and_then(|part| part.split(" Bytes").next())
+        .and_then(|part| part.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
 pub fn list_drives() -> Vec<Drive> {
     let Ok(entries) = fs::read_dir("/Volumes") else {
         return vec![];
@@ -257,7 +266,6 @@ pub fn list_drives() -> Vec<Drive> {
         }
         let uuid = diskutil_value(&info, &["Volume UUID", "Disk / Partition UUID"]);
         let device = diskutil_value(&info, &["Part of Whole", "Device Identifier"]);
-        let metadata = fs::metadata(&path).ok();
         let id = if uuid.is_empty() {
             path.to_string_lossy().into_owned()
         } else {
@@ -274,10 +282,11 @@ pub fn list_drives() -> Vec<Drive> {
             } else {
                 "外置磁盘".into()
             },
-            size: metadata.as_ref().map_or(0, fs::Metadata::len),
-            free: 0,
+            size: diskutil_bytes(&info, &["Disk Size", "Volume Total Space"]),
+            free: diskutil_bytes(&info, &["Volume Free Space"]),
             read_bps: 0.0,
             write_bps: 0.0,
+            active: fs::read_dir(&path).is_ok(),
         });
     }
     drives
@@ -334,6 +343,7 @@ pub fn list_drives() -> Vec<Drive> {
                     .unwrap_or(0),
                 read_bps: 0.0,
                 write_bps: 0.0,
+                active: fs::read_dir(format!("{device}\\")).is_ok(),
             })
         })
         .collect()
@@ -506,18 +516,22 @@ pub fn create_virtual_library(
     if options.destination.trim().is_empty() || destination.parent().is_none() {
         bail!("请选择安全的映射目标目录");
     }
+    if destination.join(".material-gater.json").is_file() {
+        cleanup_virtual_library(&options.destination, &options.id)?;
+    }
     fs::create_dir_all(&destination)?;
     let chosen: Vec<&MediaFile> = files
         .iter()
         .filter(|file| selected(file, options))
         .collect();
     let mut manifest = LibraryManifest {
-        version: 4,
+        version: 5,
         mapping_id: options.id.clone(),
         created_at: Utc::now().to_rfc3339(),
         total: chosen.len(),
         ..LibraryManifest::default()
     };
+    let mut used = HashSet::new();
     for file in chosen {
         let relative = safe_relative(&file.relative_path)
             .unwrap_or_else(|_| PathBuf::from(safe_name(&file.name)));
@@ -528,9 +542,35 @@ pub fn create_virtual_library(
                 _ => None,
             })
             .collect();
-        let target = destination
-            .join(local_day(&file.captured_at))
-            .join(safe_relative);
+        let relative = if options.mode == "original" {
+            safe_relative
+        } else {
+            let file_name = safe_name(&file.name);
+            if options.group_by_day {
+                PathBuf::from(local_day(&file.captured_at)).join(file_name)
+            } else {
+                PathBuf::from(file_name)
+            }
+        };
+        let mut target = destination.join(&relative);
+        let parent = relative.parent().map(Path::to_path_buf).unwrap_or_default();
+        let stem = relative
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("素材")
+            .to_string();
+        let suffix = relative
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        let mut copy = 2_u32;
+        while target.exists() || !used.insert(target.to_string_lossy().to_ascii_lowercase()) {
+            target = destination
+                .join(&parent)
+                .join(format!("{stem} ({copy}){suffix}"));
+            copy += 1;
+        }
         match create_link(Path::new(&file.path), &target) {
             Ok(()) => {
                 manifest.linked += 1;
@@ -660,6 +700,60 @@ mod tests {
         assert_eq!(cleanup.removed, 1);
         assert!(!cleanup.kept);
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn mapping_modes_control_directory_structure() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source");
+        fs::create_dir_all(source.join("DCIM/Card1")).expect("source directory");
+        fs::write(source.join("DCIM/Card1/A001.MOV"), vec![9_u8; 64]).expect("mov");
+        let files = walk_media(&source, "test-source").expect("scan");
+
+        let flat = temporary.path().join("flat");
+        create_virtual_library(
+            &files,
+            &LibraryOptions {
+                id: "flat".into(),
+                destination: flat.to_string_lossy().into_owned(),
+                mode: "flat".into(),
+                ..LibraryOptions::default()
+            },
+        )
+        .expect("flat mapping");
+        assert!(flat.join("A001.MOV").exists());
+
+        let original = temporary.path().join("original");
+        create_virtual_library(
+            &files,
+            &LibraryOptions {
+                id: "original".into(),
+                destination: original.to_string_lossy().into_owned(),
+                mode: "original".into(),
+                ..LibraryOptions::default()
+            },
+        )
+        .expect("original mapping");
+        assert!(original.join("DCIM/Card1/A001.MOV").exists());
+
+        let grouped = temporary.path().join("grouped");
+        create_virtual_library(
+            &files,
+            &LibraryOptions {
+                id: "grouped".into(),
+                destination: grouped.to_string_lossy().into_owned(),
+                mode: "flat".into(),
+                group_by_day: true,
+                ..LibraryOptions::default()
+            },
+        )
+        .expect("grouped mapping");
+        assert!(
+            grouped
+                .join(local_day(&files[0].captured_at))
+                .join("A001.MOV")
+                .exists()
+        );
     }
 
     #[test]

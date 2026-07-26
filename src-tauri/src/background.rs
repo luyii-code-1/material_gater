@@ -72,6 +72,7 @@ fn remember_drive(app: &AppHandle, drive: &Drive) {
             last_seen: now,
             online: true,
             external: false,
+            repository_only: false,
         });
     }
     for mapping in &mut catalog.mappings {
@@ -110,6 +111,8 @@ fn mount_known_mappings(app: &AppHandle, drive: &Drive) {
             extensions: mapping.extensions.clone(),
             start_date: mapping.start_date.clone(),
             end_date: mapping.end_date.clone(),
+            mode: mapping.mode.clone(),
+            group_by_day: mapping.group_by_day,
         };
         match create_virtual_library(&files, &options) {
             Ok(result) => {
@@ -180,6 +183,23 @@ pub fn watch_source(app: &AppHandle, drive: &Drive) {
 
 fn handle_added(app: &AppHandle, drive: &Drive, initial: bool) {
     remember_drive(app, drive);
+    let repository_only = app
+        .state::<RuntimeState>()
+        .catalog
+        .read()
+        .ok()
+        .and_then(|catalog| {
+            catalog
+                .sources
+                .iter()
+                .find(|source| source.uuid == drive.uuid)
+                .map(|source| source.repository_only)
+        })
+        .unwrap_or(false);
+    if repository_only {
+        let _ = save_catalog(&app.state::<RuntimeState>());
+        return;
+    }
     mount_known_mappings(app, drive);
     watch_source(app, drive);
     let state = app.state::<RuntimeState>();
@@ -306,8 +326,22 @@ fn poll_once(app: &AppHandle, initial: bool) {
             watchers.remove(&drive.uuid);
         }
         remember_drive(app, drive);
-        mount_known_mappings(app, drive);
-        watch_source(app, drive);
+        let repository_only = state
+            .catalog
+            .read()
+            .ok()
+            .and_then(|catalog| {
+                catalog
+                    .sources
+                    .iter()
+                    .find(|source| source.uuid == drive.uuid)
+                    .map(|source| source.repository_only)
+            })
+            .unwrap_or(false);
+        if !repository_only {
+            mount_known_mappings(app, drive);
+            watch_source(app, drive);
+        }
         let _ = save_catalog(&state);
     }
     if let Ok(mut drives) = state.drives.write() {

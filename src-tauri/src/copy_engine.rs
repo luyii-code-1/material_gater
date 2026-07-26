@@ -1,5 +1,5 @@
 use crate::models::{CopyFileState, CopyRequest, CopyTask, MediaFile, Repository};
-use crate::repository::{copy_remote_fs, copy_smb};
+use crate::repository::{copy_remote_fs, copy_smb, hash_remote_fs, hash_smb};
 use crate::storage::{RuntimeState, read_password, save_catalog};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, NaiveDate, Utc};
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 fn local_day(value: &str) -> String {
@@ -153,6 +154,9 @@ pub fn build_task(
             copied: 0,
             status: "queued".into(),
             error: String::new(),
+            source_hash: String::new(),
+            verify_status: "pending".into(),
+            verify_error: String::new(),
         });
     }
     let total_bytes = items.iter().map(|file| file.size).sum();
@@ -172,6 +176,12 @@ pub fn build_task(
         speed: 0.0,
         eta: None,
         history: vec![],
+        verify_status: "queued".into(),
+        verified_bytes: 0,
+        verify_speed: 0.0,
+        verify_eta: None,
+        verify_history: vec![],
+        verify_error: String::new(),
         files: items,
         error: String::new(),
         path_template: input.path_template.clone(),
@@ -234,6 +244,32 @@ where
         .clone();
     let _ = app.emit("copy-changed", tasks);
     Ok(task)
+}
+
+async fn hash_local_file(
+    path: &Path,
+    pause: &AtomicBool,
+    mut progress: impl FnMut(u64) -> Result<()>,
+) -> Result<String> {
+    let mut file = File::open(path)
+        .await
+        .with_context(|| format!("无法读取文件进行校验：{}", path.display()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0_u8; 4 * 1024 * 1024];
+    let mut read_total = 0_u64;
+    loop {
+        if pause.load(Ordering::Relaxed) {
+            bail!("任务已暂停");
+        }
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        read_total += read as u64;
+        progress(read_total)?;
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 async fn copy_local_file(
@@ -301,85 +337,6 @@ async fn copy_local_file(
     Ok(false)
 }
 
-async fn execute_local(
-    app: &AppHandle,
-    task: &CopyTask,
-    repository: &Repository,
-    pause: Arc<AtomicBool>,
-) -> Result<()> {
-    let mut window_bytes = 0_u64;
-    let mut window_started = Instant::now();
-    let mut last_update = Instant::now() - Duration::from_secs(1);
-    for file in task.files.clone() {
-        if file.status == "completed" {
-            continue;
-        }
-        if pause.load(Ordering::Relaxed) {
-            bail!("任务已暂停");
-        }
-        update_task(app, &task.id, |task| {
-            if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
-                value.status = "copying".into();
-                value.error.clear();
-            }
-        })?;
-        let destination = Path::new(&repository.root).join(safe_relative(&file.relative));
-        let skipped = copy_local_file(
-            Path::new(&file.source),
-            &destination,
-            &pause,
-            |bytes, copied| {
-                window_bytes += bytes;
-                if last_update.elapsed() >= Duration::from_millis(450) || bytes == 0 {
-                    let elapsed = window_started.elapsed().as_secs_f64().max(0.01);
-                    let speed = window_bytes as f64 / elapsed;
-                    update_task(app, &task.id, |task| {
-                        if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id)
-                        {
-                            value.copied = copied;
-                        }
-                        task.copied_bytes = task
-                            .files
-                            .iter()
-                            .map(|value| value.copied.min(value.size))
-                            .sum();
-                        task.speed = speed;
-                        task.eta = (speed > 0.0).then(|| {
-                            ((task.total_bytes.saturating_sub(task.copied_bytes)) as f64 / speed)
-                                .ceil() as u64
-                        });
-                        task.history.push(speed);
-                        if task.history.len() > 80 {
-                            task.history.drain(..task.history.len() - 80);
-                        }
-                    })?;
-                    window_bytes = 0;
-                    window_started = Instant::now();
-                    last_update = Instant::now();
-                }
-                Ok(())
-            },
-        )
-        .await?;
-        update_task(app, &task.id, |task| {
-            if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
-                value.copied = value.size;
-                value.status = "completed".into();
-                value.error.clear();
-            }
-            task.copied_bytes = task
-                .files
-                .iter()
-                .map(|value| value.copied.min(value.size))
-                .sum();
-            if skipped {
-                task.speed = 0.0;
-            }
-        })?;
-    }
-    Ok(())
-}
-
 fn progress_reporter(
     app: AppHandle,
     task_id: String,
@@ -420,68 +377,252 @@ fn progress_reporter(
     }
 }
 
-async fn execute_remote(
+#[derive(Clone)]
+struct VerificationJob {
+    file_id: String,
+    relative: String,
+    source_hash: String,
+    size: u64,
+}
+
+fn verification_progress(
+    app: AppHandle,
+    task_id: String,
+    file_id: String,
+    file_size: u64,
+) -> impl FnMut(u64) -> Result<()> + Send + 'static {
+    let started = Instant::now();
+    let mut last_update = Instant::now() - Duration::from_secs(1);
+    move |current| {
+        if last_update.elapsed() >= Duration::from_millis(450) || current == file_size {
+            let speed = current as f64 / started.elapsed().as_secs_f64().max(0.01);
+            update_task(&app, &task_id, |task| {
+                let completed: u64 = task
+                    .files
+                    .iter()
+                    .filter(|file| file.verify_status == "verified")
+                    .map(|file| file.size)
+                    .sum();
+                task.verified_bytes = completed.saturating_add(current.min(file_size));
+                task.verify_speed = speed;
+                task.verify_eta = (speed > 0.0).then(|| {
+                    ((task.total_bytes.saturating_sub(task.verified_bytes)) as f64 / speed).ceil()
+                        as u64
+                });
+                task.verify_history.push(speed);
+                if task.verify_history.len() > 80 {
+                    task.verify_history.drain(..task.verify_history.len() - 80);
+                }
+                if let Some(file) = task.files.iter_mut().find(|file| file.id == file_id) {
+                    file.verify_status = "verifying".into();
+                }
+            })?;
+            last_update = Instant::now();
+        }
+        Ok(())
+    }
+}
+
+async fn verify_job(
+    app: &AppHandle,
+    task_id: &str,
+    repository: &Repository,
+    password: &str,
+    pause: Arc<AtomicBool>,
+    job: VerificationJob,
+) -> Result<()> {
+    update_task(app, task_id, |task| {
+        task.verify_status = "running".into();
+        if let Some(file) = task.files.iter_mut().find(|file| file.id == job.file_id) {
+            file.verify_status = "verifying".into();
+            file.verify_error.clear();
+        }
+    })?;
+    let progress = verification_progress(
+        app.clone(),
+        task_id.to_string(),
+        job.file_id.clone(),
+        job.size,
+    );
+    let destination_hash = match repository.repository_type.as_str() {
+        "local" => {
+            let destination = Path::new(&repository.root).join(safe_relative(&job.relative));
+            hash_local_file(&destination, &pause, progress).await?
+        }
+        "smb" => hash_smb(repository, password, &job.relative, pause.clone(), progress).await?,
+        "ftp" | "sftp" => {
+            let repository = repository.clone();
+            let password = password.to_string();
+            let relative = job.relative.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                hash_remote_fs(&repository, &password, &relative, pause, progress)
+            })
+            .await??
+        }
+        _ => bail!("不支持的储存库类型"),
+    };
+    if destination_hash != job.source_hash {
+        let message = format!("文件校验失败：{}", job.relative);
+        update_task(app, task_id, |task| {
+            task.verify_status = "failed".into();
+            task.verify_error = message.clone();
+            if let Some(file) = task.files.iter_mut().find(|file| file.id == job.file_id) {
+                file.verify_status = "failed".into();
+                file.verify_error = message.clone();
+                file.status = "failed".into();
+            }
+        })?;
+        bail!(message);
+    }
+    update_task(app, task_id, |task| {
+        if let Some(file) = task.files.iter_mut().find(|file| file.id == job.file_id) {
+            file.verify_status = "verified".into();
+            file.verify_error.clear();
+            file.status = "completed".into();
+        }
+        task.verified_bytes = task
+            .files
+            .iter()
+            .filter(|file| file.verify_status == "verified")
+            .map(|file| file.size)
+            .sum();
+    })?;
+    Ok(())
+}
+
+async fn execute_pipeline(
     app: &AppHandle,
     task: &CopyTask,
     repository: &Repository,
     password: &str,
     pause: Arc<AtomicBool>,
 ) -> Result<()> {
-    for file in task.files.clone() {
-        if file.status == "completed" {
+    let (verify_tx, mut verify_rx) = mpsc::channel::<VerificationJob>(2);
+    let verify_app = app.clone();
+    let verify_task_id = task.id.clone();
+    let verify_repository = repository.clone();
+    let verify_password = password.to_string();
+    let verify_pause = pause.clone();
+    let verifier = tauri::async_runtime::spawn(async move {
+        while let Some(job) = verify_rx.recv().await {
+            verify_job(
+                &verify_app,
+                &verify_task_id,
+                &verify_repository,
+                &verify_password,
+                verify_pause.clone(),
+                job,
+            )
+            .await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+
+    for original in task.files.clone() {
+        if original.verify_status == "verified" {
             continue;
         }
         if pause.load(Ordering::Relaxed) {
             bail!("任务已暂停");
         }
-        update_task(app, &task.id, |task| {
-            if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
-                value.status = "copying".into();
-                value.error.clear();
+        let mut file = update_task(app, &task.id, |_| {})?
+            .files
+            .into_iter()
+            .find(|file| file.id == original.id)
+            .unwrap_or(original);
+        if file.source_hash.is_empty() {
+            update_task(app, &task.id, |task| {
+                if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
+                    value.status = "hashing".into();
+                    value.error.clear();
+                }
+            })?;
+            let source_hash = hash_local_file(Path::new(&file.source), &pause, |_| Ok(())).await?;
+            file.source_hash = source_hash.clone();
+            update_task(app, &task.id, |task| {
+                if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
+                    value.source_hash = source_hash;
+                    value.status = "queued".into();
+                }
+            })?;
+        }
+
+        if file.status != "copied" && file.status != "completed" {
+            update_task(app, &task.id, |task| {
+                if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
+                    value.status = "copying".into();
+                    value.error.clear();
+                }
+            })?;
+            let progress = progress_reporter(app.clone(), task.id.clone(), file.id.clone());
+            match repository.repository_type.as_str() {
+                "local" => {
+                    let destination =
+                        Path::new(&repository.root).join(safe_relative(&file.relative));
+                    copy_local_file(Path::new(&file.source), &destination, &pause, progress)
+                        .await?;
+                }
+                "smb" => {
+                    copy_smb(
+                        repository,
+                        password,
+                        Path::new(&file.source),
+                        &file.relative,
+                        pause.clone(),
+                        progress,
+                    )
+                    .await?;
+                }
+                "ftp" | "sftp" => {
+                    let repository = repository.clone();
+                    let password = password.to_string();
+                    let source = PathBuf::from(&file.source);
+                    let relative = file.relative.clone();
+                    let transfer_pause = pause.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        copy_remote_fs(
+                            &repository,
+                            &password,
+                            &source,
+                            &relative,
+                            transfer_pause,
+                            progress,
+                        )
+                    })
+                    .await??;
+                }
+                _ => bail!("不支持的储存库类型"),
             }
-        })?;
-        let progress = progress_reporter(app.clone(), task.id.clone(), file.id.clone());
-        let skipped = match repository.repository_type.as_str() {
-            "smb" => {
-                copy_smb(
-                    repository,
-                    password,
-                    Path::new(&file.source),
-                    &file.relative,
-                    pause.clone(),
-                    progress,
-                )
-                .await?
-            }
-            "ftp" | "sftp" => {
-                let repository = repository.clone();
-                let password = password.to_string();
-                let source = PathBuf::from(&file.source);
-                let relative = file.relative.clone();
-                let pause = pause.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    copy_remote_fs(&repository, &password, &source, &relative, pause, progress)
-                })
-                .await??
-            }
-            _ => bail!("不支持的远程储存库类型"),
-        };
-        update_task(app, &task.id, |task| {
-            if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
-                value.copied = value.size;
-                value.status = "completed".into();
-                value.error.clear();
-            }
-            task.copied_bytes = task
-                .files
-                .iter()
-                .map(|value| value.copied.min(value.size))
-                .sum();
-            if skipped {
-                task.speed = 0.0;
-            }
-        })?;
+            update_task(app, &task.id, |task| {
+                if let Some(value) = task.files.iter_mut().find(|value| value.id == file.id) {
+                    value.copied = value.size;
+                    value.status = "copied".into();
+                    value.verify_status = "queued".into();
+                }
+                task.copied_bytes = task
+                    .files
+                    .iter()
+                    .map(|value| value.copied.min(value.size))
+                    .sum();
+            })?;
+        }
+        verify_tx
+            .send(VerificationJob {
+                file_id: file.id,
+                relative: file.relative,
+                source_hash: file.source_hash,
+                size: file.size,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("文件校验任务意外结束"))?;
     }
+    drop(verify_tx);
+    update_task(app, &task.id, |task| {
+        task.status = "verifying".into();
+        task.speed = 0.0;
+        task.eta = Some(0);
+    })?;
+    verifier.await??;
     Ok(())
 }
 
@@ -495,11 +636,7 @@ async fn execute_task(app: AppHandle, id: String, pause: Arc<AtomicBool>) {
         return;
     };
     let password = read_password(&repository.id);
-    let result = if repository.repository_type == "local" || !repository.root.is_empty() {
-        execute_local(&app, &task, &repository, pause.clone()).await
-    } else {
-        execute_remote(&app, &task, &repository, &password, pause.clone()).await
-    };
+    let result = execute_pipeline(&app, &task, &repository, &password, pause.clone()).await;
     match result {
         Ok(()) => {
             let _ = update_task(&app, &id, |task| {
@@ -508,6 +645,11 @@ async fn execute_task(app: AppHandle, id: String, pause: Arc<AtomicBool>) {
                 task.speed = 0.0;
                 task.eta = Some(0);
                 task.error.clear();
+                task.verify_status = "completed".into();
+                task.verified_bytes = task.total_bytes;
+                task.verify_speed = 0.0;
+                task.verify_eta = Some(0);
+                task.verify_error.clear();
             });
         }
         Err(_error) if pause.load(Ordering::Relaxed) => {
@@ -515,8 +657,18 @@ async fn execute_task(app: AppHandle, id: String, pause: Arc<AtomicBool>) {
                 task.status = "paused".into();
                 task.speed = 0.0;
                 task.error.clear();
+                task.verify_status = "paused".into();
+                task.verify_speed = 0.0;
                 if let Some(file) = task.files.iter_mut().find(|file| file.status == "copying") {
                     file.status = "queued".into();
+                }
+                for file in &mut task.files {
+                    if file.status == "hashing" {
+                        file.status = "queued".into();
+                    }
+                    if file.verify_status == "verifying" {
+                        file.verify_status = "queued".into();
+                    }
                 }
             });
         }
@@ -526,6 +678,10 @@ async fn execute_task(app: AppHandle, id: String, pause: Arc<AtomicBool>) {
                 task.status = "failed".into();
                 task.speed = 0.0;
                 task.error = message.clone();
+                if task.verify_status == "running" {
+                    task.verify_status = "failed".into();
+                    task.verify_error = message.clone();
+                }
                 if let Some(file) = task.files.iter_mut().find(|file| file.status == "copying") {
                     file.status = "failed".into();
                     file.error = message;
@@ -552,7 +708,10 @@ pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
             .iter()
             .find(|task| task.id == id)
             .context("找不到拷贝任务")?;
-        if task.status == "running" || task.status == "completed" {
+        if task.status == "running"
+            || task.status == "verifying"
+            || (task.status == "completed" && task.verify_status == "completed")
+        {
             return Ok(());
         }
     }
@@ -564,6 +723,7 @@ pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
         .insert(id.into(), pause.clone());
     update_task(app, id, |task| {
         task.status = "running".into();
+        task.verify_status = "queued".into();
         task.error.clear();
         task.copied_bytes = task
             .files
@@ -587,13 +747,15 @@ pub fn pause_task(app: &AppHandle, id: &str) -> Result<()> {
         .cloned();
     if let Some(pause) = pause {
         pause.store(true, Ordering::Relaxed);
-    } else {
-        update_task(app, id, |task| {
-            if task.status != "completed" {
-                task.status = "paused".into();
-            }
-        })?;
     }
+    update_task(app, id, |task| {
+        if task.status != "completed" {
+            task.status = "paused".into();
+            task.verify_status = "paused".into();
+            task.speed = 0.0;
+            task.verify_speed = 0.0;
+        }
+    })?;
     Ok(())
 }
 
@@ -675,5 +837,17 @@ mod tests {
             content.len() as u64
         );
         assert_eq!(transferred, (content.len() - 512 * 1024) as u64);
+    }
+
+    #[tokio::test]
+    async fn local_hash_matches_blake3_reference() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("clip.mov");
+        let content = b"material-gater-integrity-check";
+        std::fs::write(&source, content).expect("source");
+        let hash = hash_local_file(&source, &AtomicBool::new(false), |_| Ok(()))
+            .await
+            .expect("hash");
+        assert_eq!(hash, blake3::hash(content).to_hex().to_string());
     }
 }
