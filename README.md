@@ -1,6 +1,12 @@
-# Material Gater
+<p align="center">
+  <img src="assets/material-gater-icon.svg" width="112" height="112" alt="Material Gater 图标">
+</p>
 
-[![Build and Release](https://github.com/luyii-code-1/material_gater/actions/workflows/release.yml/badge.svg)](https://github.com/luyii-code-1/material_gater/actions/workflows/release.yml)
+<h1 align="center">Material Gater</h1>
+
+<p align="center">
+  <a href="https://github.com/luyii-code-1/material_gater/actions/workflows/release.yml"><img src="https://github.com/luyii-code-1/material_gater/actions/workflows/release.yml/badge.svg" alt="Build and Release"></a>
+</p>
 
 Material Gater 是一款面向摄影、影视工作流的轻量跨平台素材门卫。它识别插入的 SD 卡或 SSD，建立本地索引，再按文件类型和拍摄日期生成一个干净的虚拟素材库，供 Premiere Pro、DaVinci Resolve、Final Cut Pro 等剪辑软件直接读取。
 
