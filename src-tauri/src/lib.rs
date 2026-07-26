@@ -5,6 +5,7 @@ mod media;
 mod models;
 mod repository;
 mod storage;
+mod tasks;
 
 use crate::storage::{RuntimeState, load_catalog, resolve_data_directory};
 use tauri::menu::MenuBuilder;
@@ -117,6 +118,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_drives,
+            commands::get_background_tasks,
             commands::scan_media,
             commands::list_directory,
             commands::create_library,

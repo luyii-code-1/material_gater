@@ -184,6 +184,21 @@ pub struct CopyTask {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackgroundTask {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub current: u64,
+    pub total: Option<u64>,
+    pub error: String,
+    pub started_at: String,
+    pub updated_at: String,
+}
+
 fn default_foreground_scan_ms() -> u64 {
     1_000
 }

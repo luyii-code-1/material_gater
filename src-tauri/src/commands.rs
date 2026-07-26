@@ -1,11 +1,12 @@
 use crate::copy_engine::{build_task, pause_task, start_task};
 use crate::media::{
-    cleanup_virtual_library, create_virtual_library, list_directory as read_directory, walk_media,
+    cleanup_virtual_library, create_virtual_library, list_directory as read_directory,
+    walk_media_with_progress,
 };
 use crate::models::{
-    AppState, CopyPreset, CopyRequest, DeleteMappingRequest, DirectoryEntry, Drive, LibraryOptions,
-    MappingInput, MappingProfile, MappingRun, Repository, RepositoryInput, SettingsPatch,
-    SourceRecord,
+    AppState, BackgroundTask, CopyPreset, CopyRequest, DeleteMappingRequest, DirectoryEntry, Drive,
+    LibraryOptions, MappingInput, MappingProfile, MappingRun, Repository, RepositoryInput,
+    SettingsPatch, SourceRecord,
 };
 use crate::repository;
 use crate::storage::{RuntimeState, delete_password, save_catalog, snapshot, store_password};
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tauri::menu::MenuBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use uuid::Uuid;
@@ -33,6 +35,13 @@ pub fn get_drives(state: State<'_, RuntimeState>) -> std::result::Result<Vec<Dri
         .read()
         .map(|value| value.clone())
         .map_err(|_| "磁盘状态锁已损坏".into())
+}
+
+#[tauri::command]
+pub fn get_background_tasks(
+    state: State<'_, RuntimeState>,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result(crate::tasks::list(&state))
 }
 
 fn resolve_drive(state: &RuntimeState, source: &str) -> Drive {
@@ -103,10 +112,78 @@ fn update_source(catalog: &mut crate::models::Catalog, drive: &Drive) {
     }
 }
 
-fn scan_source(app: &AppHandle, source: &str, quiet: bool) -> Result<AppState> {
+fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Result<()> {
     let state = app.state::<RuntimeState>();
     let drive = resolve_drive(&state, source);
-    let files = walk_media(Path::new(&drive.path), &drive.uuid)?;
+    let mut last_progress = Instant::now() - Duration::from_secs(1);
+    let mut files = walk_media_with_progress(Path::new(&drive.path), &drive.uuid, |count| {
+        if last_progress.elapsed() >= Duration::from_millis(120) {
+            crate::tasks::update(
+                app,
+                task_id,
+                Some("扫描素材库"),
+                Some(format!("{} · 已发现 {count} 个素材", drive.name)),
+                count as u64,
+                None,
+            );
+            last_progress = Instant::now();
+        }
+    })?;
+    let file_count = files.len();
+    crate::tasks::update(
+        app,
+        task_id,
+        Some("处理索引"),
+        Some(format!("{} · 正在整理 {file_count} 个素材", drive.name)),
+        0,
+        Some(file_count as u64),
+    );
+
+    let mapping_options = state
+        .catalog
+        .read()
+        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+        .mappings
+        .iter()
+        .filter(|mapping| mapping.source_uuid == drive.uuid)
+        .map(|mapping| LibraryOptions {
+            id: mapping.id.clone(),
+            destination: mapping.destination.clone(),
+            extensions: mapping.extensions.clone(),
+            start_date: mapping.start_date.clone(),
+            end_date: mapping.end_date.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut mapping_results = Vec::with_capacity(mapping_options.len());
+    for (index, options) in mapping_options.iter().enumerate() {
+        crate::tasks::update(
+            app,
+            task_id,
+            Some("处理索引"),
+            Some(format!(
+                "{} · 更新映射 {}/{}",
+                drive.name,
+                index + 1,
+                mapping_options.len()
+            )),
+            file_count as u64,
+            Some(file_count as u64),
+        );
+        let outcome = match create_virtual_library(&files, options) {
+            Ok(result) => (
+                true,
+                String::new(),
+                Some(MappingRun {
+                    at: Utc::now().to_rfc3339(),
+                    total: result.total,
+                    linked: result.linked,
+                    failed: result.failures.len(),
+                }),
+            ),
+            Err(error) => (false, error.to_string(), None),
+        };
+        mapping_results.push((options.id.clone(), outcome));
+    }
     {
         let mut catalog = state
             .catalog
@@ -115,37 +192,15 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool) -> Result<AppState> {
         catalog
             .files
             .retain(|file| file.source_uuid != drive.uuid && file.source != drive.path);
-        catalog.files.extend(files.clone());
+        catalog.files.append(&mut files);
         catalog.last_scan = Some(Utc::now().to_rfc3339());
         catalog.source = Some(drive.path.clone());
         update_source(&mut catalog, &drive);
-        for mapping in catalog
-            .mappings
-            .iter_mut()
-            .filter(|mapping| mapping.source_uuid == drive.uuid)
-        {
-            let options = LibraryOptions {
-                id: mapping.id.clone(),
-                destination: mapping.destination.clone(),
-                extensions: mapping.extensions.clone(),
-                start_date: mapping.start_date.clone(),
-                end_date: mapping.end_date.clone(),
-            };
-            match create_virtual_library(&files, &options) {
-                Ok(result) => {
-                    mapping.mounted = true;
-                    mapping.mount_error.clear();
-                    mapping.last_run = Some(MappingRun {
-                        at: Utc::now().to_rfc3339(),
-                        total: result.total,
-                        linked: result.linked,
-                        failed: result.failures.len(),
-                    });
-                }
-                Err(error) => {
-                    mapping.mounted = false;
-                    mapping.mount_error = error.to_string();
-                }
+        for (id, (mounted, error, run)) in mapping_results {
+            if let Some(mapping) = catalog.mappings.iter_mut().find(|mapping| mapping.id == id) {
+                mapping.mounted = mounted;
+                mapping.mount_error = error;
+                mapping.last_run = run;
             }
         }
     }
@@ -156,20 +211,47 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool) -> Result<AppState> {
     if !quiet {
         let _ = app.emit(
             "scan-completed",
-            json!({ "uuid": drive.uuid, "name": drive.name, "count": files.len() }),
+            json!({ "uuid": drive.uuid, "name": drive.name, "count": file_count }),
         );
     }
-    Ok(result)
+    crate::tasks::update(
+        app,
+        task_id,
+        Some("处理索引"),
+        Some(format!("{} · 已处理 {file_count} 个素材", drive.name)),
+        file_count as u64,
+        Some(file_count as u64),
+    );
+    crate::tasks::complete(app, task_id, &drive.uuid);
+    Ok(())
+}
+
+fn queue_scan(app: &AppHandle, source: &str, quiet: bool) -> Result<BackgroundTask> {
+    let state = app.state::<RuntimeState>();
+    let drive = resolve_drive(&state, source);
+    let (task, started) = crate::tasks::begin_scan(
+        app,
+        &drive.uuid,
+        "扫描素材库".into(),
+        format!("{} · 准备读取目录", drive.name),
+    )?;
+    if started {
+        let app = app.clone();
+        let source = source.to_string();
+        let task_id = task.id.clone();
+        let key = drive.uuid;
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = scan_source(&app, &source, quiet, &task_id) {
+                crate::tasks::fail(&app, &task_id, &key, error.to_string());
+            }
+        });
+    }
+    Ok(task)
 }
 
 #[tauri::command]
-pub async fn scan_media(app: AppHandle, source: String) -> std::result::Result<AppState, String> {
-    command_result(
-        tauri::async_runtime::spawn_blocking(move || scan_source(&app, &source, false))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|value| value),
-    )
+pub fn scan_media(app: AppHandle, source: String) -> std::result::Result<BackgroundTask, String> {
+    command_result(queue_scan(&app, &source, false))
 }
 
 #[tauri::command]
@@ -727,6 +809,6 @@ pub fn show_media_menu(
     })())
 }
 
-pub fn scan_source_quiet(app: &AppHandle, source: &str) -> Result<AppState> {
-    scan_source(app, source, true)
+pub fn scan_source_quiet(app: &AppHandle, source: &str) -> Result<BackgroundTask> {
+    queue_scan(app, source, true)
 }

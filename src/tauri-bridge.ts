@@ -3,7 +3,7 @@ import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/eve
 import { confirm, open } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import type {
-  AppState, CopyPreset, CopyRequest, CopyTask, DirectoryEntry, Drive, MappingInput,
+  AppState, BackgroundTask, CopyPreset, CopyRequest, CopyTask, DirectoryEntry, Drive, MappingInput,
   MappingProfile, Repository, RepositoryType, Settings
 } from './types';
 
@@ -17,11 +17,12 @@ function subscribe<T>(event: string, callback: (payload: T) => void): () => void
 window.materialGater = {
   getState: () => invoke<AppState>('get_state'),
   getDrives: () => invoke<Drive[]>('get_drives'),
+  getBackgroundTasks: () => invoke<BackgroundTask[]>('get_background_tasks'),
   chooseDirectory: async (title) => {
     const value = await open({ title, directory: true, multiple: false, canCreateDirectories: true });
     return typeof value === 'string' ? value : null;
   },
-  scan: (source) => invoke<AppState>('scan_media', { source }),
+  scan: (source) => invoke<BackgroundTask>('scan_media', { source }),
   listDirectory: (root, relative) => invoke<DirectoryEntry[]>('list_directory', { root, relative }),
   openMedia: async (target) => { await openPath(target); return ''; },
   revealMedia: (target) => revealItemInDir(target),
@@ -45,6 +46,7 @@ window.materialGater = {
   onDriveIo: (callback) => subscribe('drives-io', callback),
   onStateChanged: (callback) => subscribe('state-changed', callback),
   onCopyChanged: (callback) => subscribe('copy-changed', callback),
+  onBackgroundTasksChanged: (callback) => subscribe('background-tasks-changed', callback),
   onSourceRemoved: (callback) => subscribe('source-removed', callback),
   onScanCompleted: (callback) => subscribe('scan-completed', callback)
 };

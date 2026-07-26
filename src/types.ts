@@ -26,6 +26,7 @@ export type CopyPreset = {
 };
 export type CopyFileState = { id: string; source: string; relative: string; size: number; copied: number; status: string; error: string };
 export type CopyTask = { id: string; name: string; repositoryId: string; sourceUuid: string; status: 'queued' | 'running' | 'paused' | 'completed' | 'failed'; totalBytes: number; copiedBytes: number; speed: number; eta: number | null; history: number[]; files: CopyFileState[]; error?: string; createdAt: string; updatedAt: string };
+export type BackgroundTask = { id: string; kind: 'scan' | 'index' | string; title: string; detail: string; status: 'running' | 'completed' | 'failed'; current: number; total: number | null; error: string; startedAt: string; updatedAt: string };
 export type Settings = { foregroundScanMs: number; backgroundScanMs: number; askBeforeScan: boolean; notifications: boolean; keepRunning: boolean };
 export type AppState = {
   catalog: { version: number; files: MediaFile[]; sources: SourceRecord[]; mappings: MappingProfile[]; repositories: Repository[]; presets: CopyPreset[]; tasks: CopyTask[]; settings: Settings; lastScan: string | null; source: string | null };
@@ -38,8 +39,8 @@ export type CopyRequest = { name: string; sourceUuid: string; repositoryId: stri
 declare global {
   interface Window {
     materialGater: {
-      getState(): Promise<AppState>; getDrives(): Promise<Drive[]>; chooseDirectory(title: string): Promise<string | null>;
-      scan(source: string): Promise<AppState>; listDirectory(root: string, relative: string): Promise<DirectoryEntry[]>;
+      getState(): Promise<AppState>; getDrives(): Promise<Drive[]>; getBackgroundTasks(): Promise<BackgroundTask[]>; chooseDirectory(title: string): Promise<string | null>;
+      scan(source: string): Promise<BackgroundTask>; listDirectory(root: string, relative: string): Promise<DirectoryEntry[]>;
       openMedia(target: string): Promise<string>; revealMedia(target: string): Promise<void>; showMediaMenu(target: string): Promise<void>;
       createLibrary(options: { destination: string; extensions: string[]; startDate?: string; endDate?: string }): Promise<{ total: number; linked: number; failures: unknown[] }>;
       saveMapping(mapping: MappingInput): Promise<{ state: AppState; mapping: MappingProfile }>;
@@ -54,6 +55,7 @@ declare global {
       onDrivesChanged(callback: (drives: Drive[]) => void): () => void;
       onDriveIo(callback: (speeds: Array<{ id: string; readBps: number; writeBps: number }>) => void): () => void;
       onStateChanged(callback: (state: AppState) => void): () => void; onCopyChanged(callback: (tasks: CopyTask[]) => void): () => void;
+      onBackgroundTasksChanged(callback: (tasks: BackgroundTask[]) => void): () => void;
       onSourceRemoved(callback: (info: Drive & { removedLinks: number }) => void): () => void;
       onScanCompleted(callback: (info: { uuid: string; name: string; count: number }) => void): () => void;
     };

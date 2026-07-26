@@ -97,7 +97,16 @@ fn stable_file_id(_path: &Path, metadata: &fs::Metadata) -> String {
     }
 }
 
+#[cfg(test)]
 pub fn walk_media(root: &Path, source_uuid: &str) -> Result<Vec<MediaFile>> {
+    walk_media_with_progress(root, source_uuid, |_| {})
+}
+
+pub fn walk_media_with_progress(
+    root: &Path,
+    source_uuid: &str,
+    mut progress: impl FnMut(usize),
+) -> Result<Vec<MediaFile>> {
     let root =
         fs::canonicalize(root).with_context(|| format!("无法访问素材源：{}", root.display()))?;
     let mut files = Vec::new();
@@ -136,12 +145,16 @@ pub fn walk_media(root: &Path, source_uuid: &str) -> Result<Vec<MediaFile>> {
             source: root.to_string_lossy().into_owned(),
             source_uuid: source_uuid.into(),
         });
+        if files.len().is_multiple_of(256) {
+            progress(files.len());
+        }
     }
     files.sort_by(|a, b| {
         b.captured_at
             .cmp(&a.captured_at)
             .then_with(|| a.relative_path.cmp(&b.relative_path))
     });
+    progress(files.len());
     Ok(files)
 }
 

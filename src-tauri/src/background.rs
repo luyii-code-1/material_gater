@@ -280,6 +280,15 @@ fn poll_once(app: &AppHandle, initial: bool) {
         .iter()
         .map(|drive| (drive.uuid.clone(), drive))
         .collect();
+    let topology_changed = previous.len() != next.len()
+        || previous.iter().any(|drive| {
+            new.get(&drive.uuid).is_none_or(|current| {
+                current.path != drive.path
+                    || current.name != drive.name
+                    || current.device != drive.device
+                    || current.kind != drive.kind
+            })
+        });
     for drive in previous
         .iter()
         .filter(|drive| !new.contains_key(&drive.uuid))
@@ -304,11 +313,11 @@ fn poll_once(app: &AppHandle, initial: bool) {
     if let Ok(mut drives) = state.drives.write() {
         *drives = next.clone();
     }
-    if previous != next {
+    if topology_changed {
         let _ = app.emit("drives-changed", &next);
-    }
-    if let Ok(value) = snapshot(&state) {
-        let _ = app.emit("state-changed", value);
+        if let Ok(value) = snapshot(&state) {
+            let _ = app.emit("state-changed", value);
+        }
     }
 }
 

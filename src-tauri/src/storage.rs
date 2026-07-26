@@ -1,8 +1,9 @@
-use crate::models::{AppState, Catalog, Drive, Stats, StatsBucket};
+use crate::models::{AppState, BackgroundTask, Catalog, Drive, Stats, StatsBucket};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
@@ -21,6 +22,8 @@ pub struct RuntimeState {
     pub context_target: RwLock<Option<PathBuf>>,
     pub source_watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     pub scan_debounces: Mutex<HashMap<String, Instant>>,
+    pub background_tasks: RwLock<Vec<BackgroundTask>>,
+    pub active_scans: Mutex<HashMap<String, String>>,
 }
 
 impl RuntimeState {
@@ -35,6 +38,8 @@ impl RuntimeState {
             context_target: RwLock::new(None),
             source_watchers: Mutex::new(HashMap::new()),
             scan_debounces: Mutex::new(HashMap::new()),
+            background_tasks: RwLock::new(vec![]),
+            active_scans: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -129,8 +134,7 @@ pub fn save_catalog(state: &RuntimeState) -> Result<()> {
     let catalog = state
         .catalog
         .read()
-        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
-        .clone();
+        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
     save_catalog_to(&state.data_dir, &catalog)
 }
 
@@ -138,7 +142,10 @@ fn save_catalog_to(data_dir: &Path, catalog: &Catalog) -> Result<()> {
     fs::create_dir_all(data_dir)?;
     let destination = data_dir.join("catalog.json");
     let temporary = data_dir.join("catalog.json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(catalog)?).context("无法写入素材库")?;
+    let file = File::create(&temporary).context("无法创建素材库临时文件")?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(&mut writer, catalog).context("无法写入素材库")?;
+    writer.flush().context("无法刷新素材库")?;
     if destination.exists() {
         let _ = fs::remove_file(&destination);
     }
