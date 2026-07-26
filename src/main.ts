@@ -1,4 +1,5 @@
 import '@fontsource-variable/noto-sans-sc';
+import './tauri-bridge';
 import './style.css';
 import type { AppState, CopyPreset, DirectoryEntry, Drive, MappingInput, MappingProfile, MediaFile, Repository, RepositoryType } from './types';
 

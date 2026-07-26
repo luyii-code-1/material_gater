@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  // The packaged Electron app is loaded through file://, so assets must be
-  // resolved relative to dist/index.html instead of from the filesystem root.
+  // Tauri serves the bundled frontend from its application protocol. Relative
+  // assets keep development and packaged builds on the same path semantics.
   base: './'
 });

@@ -4,7 +4,9 @@
 
 Material Gater 是一款面向摄影、影视工作流的轻量跨平台素材门卫。它识别插入的 SD 卡或 SSD，建立本地索引，再按文件类型和拍摄日期生成一个干净的虚拟素材库，供 Premiere Pro、DaVinci Resolve、Final Cut Pro 等剪辑软件直接读取。
 
-> 当前版本：`0.6.0`。支持 macOS 与 Windows，界面语言为简体中文。
+> 当前版本：`0.7.0`。支持 macOS 与 Windows，界面语言为简体中文。
+
+桌面壳已迁移至 Tauri 2：磁盘识别、索引、映射、系统安全存储和拷贝守护任务均由原生 Rust 后端执行，界面仅保留轻量 TypeScript/Vite 渲染层。
 
 ## 功能
 
@@ -27,7 +29,7 @@ Material Gater 是一款面向摄影、影视工作流的轻量跨平台素材�
 - 删除映射时可只删配置，或同时清理该映射生成的链接；用户自行放入的文件不会被删除
 - 左下角实时显示每个已连接磁盘的读写速度
 - 素材库使用不同颜色区分视频、音频、RAW、图片与其他文件
-- “本地文件”统一覆盖内置盘、USB 硬盘与已挂载目录，另支持 SMB、FTP 与 SFTP；密码使用系统安全存储加密
+- “本地文件”统一覆盖内置盘、USB 硬盘与已挂载目录，另支持原生 SMB、FTP 与 SFTP 连接；测试连接会完成真实鉴权和远程目录验证，密码使用系统钥匙串/凭据管理器保存
 - 三步拷贝向导依次完成大列表选材、储存位置设置和执行复核，任务队列独立显示
 - 拷贝预设分为只读的内置预设与用户自定义预设，可保存筛选条件、储存方式与目录规则
 - 默认储存直接采用储存位置内预设的目录规则；自定义储存才显示临时目录与文件结构选项
@@ -40,7 +42,14 @@ Material Gater 是一款面向摄影、影视工作流的轻量跨平台素材�
 
 ## 本地开发
 
-需要 Node.js 20 或更高版本。
+需要 Node.js 20 或更高版本、Rust stable 工具链，以及对应平台的 Tauri 2 系统依赖。macOS 需要 Xcode Command Line Tools；Windows 需要 Microsoft C++ Build Tools 与 WebView2。
+
+安装 Rust：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup component add rustfmt clippy
+```
 
 ```bash
 npm install
@@ -51,7 +60,7 @@ npm run dev
 
 ```bash
 npm test
-npm run build
+npm run check
 ```
 
 ## 打包
@@ -62,10 +71,10 @@ npm run build
 npm run dist
 ```
 
-- macOS 产物：DMG 与 ZIP
+- macOS 产物：原生 App、DMG 与 CI 生成的 ZIP
 - Windows 产物：Portable EXE 与 NSIS 安装包
 
-推送形如 `v0.6.0` 的版本标签后，GitHub Actions 会分别在 macOS 与 Windows 托管运行器中执行测试、构建原生安装包，并把 DMG、ZIP、Portable EXE 和 NSIS 安装包汇总到同一个 GitHub Release。也可以在 Actions 页面手动运行工作流，只生成可下载的 CI 构建产物而不发布 Release。
+推送形如 `v0.7.0` 的版本标签后，GitHub Actions 会分别在 macOS arm64 与 Windows x64 托管运行器中安装 Rust、执行 TypeScript/Rust 检查和单元测试，再把 DMG、ZIP、Portable EXE 和 NSIS 安装包汇总到同一个 GitHub Release。也可以在 Actions 页面手动运行工作流，只生成可下载的 CI 构建产物而不发布 Release。
 
 未签名的本地构建可能被 Gatekeeper 或 SmartScreen 提示。正式发布时需配置 Apple Developer ID 和 Windows 代码签名证书。
 

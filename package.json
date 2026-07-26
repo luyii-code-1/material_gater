@@ -1,67 +1,30 @@
 {
   "name": "material-gater",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "跨平台素材拷贝、筛选与虚拟素材库管理工具",
-  "main": "electron/main.cjs",
   "author": "luyii-code-1",
   "license": "MIT",
   "private": true,
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && electron .\"",
+    "dev": "tauri dev",
+    "web:dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "start": "electron .",
-    "dist": "npm run build && electron-builder",
-    "test": "node --test tests/core.test.cjs"
+    "start": "tauri dev",
+    "dist": "tauri build",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "npm run build && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.3.0",
-    "@marsaud/smb2": "^0.18.0",
-    "basic-ftp": "^5.1.0",
-    "ssh2-sftp-client": "^12.1.1"
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/plugin-opener": "^2.5.4"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^24.0.0",
-    "concurrently": "^9.2.0",
-    "electron": "^37.2.0",
-    "electron-builder": "^26.0.12",
     "typescript": "^5.8.3",
-    "vite": "^7.0.0",
-    "wait-on": "^8.0.4"
-  },
-  "build": {
-    "appId": "com.materialgater.app",
-    "productName": "Material Gater",
-    "asar": true,
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json"
-    ],
-    "directories": {
-      "buildResources": "build",
-      "output": "release"
-    },
-    "mac": {
-      "icon": "build/icon.png",
-      "artifactName": "Material-Gater-${version}-${arch}.${ext}",
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "category": "public.app-category.video"
-    },
-    "win": {
-      "icon": "build/icon.png",
-      "target": [
-        "portable",
-        "nsis"
-      ]
-    },
-    "nsis": {
-      "artifactName": "Material-Gater-${version}-Setup.${ext}"
-    },
-    "portable": {
-      "artifactName": "Material-Gater-${version}-Portable.${ext}"
-    }
+    "vite": "^7.0.0"
   }
 }
