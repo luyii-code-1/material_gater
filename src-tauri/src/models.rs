@@ -237,6 +237,8 @@ pub struct Settings {
     pub notifications: bool,
     #[serde(default = "default_true")]
     pub keep_running: bool,
+    #[serde(default)]
+    pub ffmpeg_path: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -247,6 +249,7 @@ pub struct SettingsPatch {
     pub ask_before_scan: Option<bool>,
     pub notifications: Option<bool>,
     pub keep_running: Option<bool>,
+    pub ffmpeg_path: Option<String>,
 }
 
 impl Default for Settings {
@@ -257,8 +260,17 @@ impl Default for Settings {
             ask_before_scan: true,
             notifications: true,
             keep_running: true,
+            ffmpeg_path: String::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegInfo {
+    pub path: String,
+    pub version: String,
+    pub valid: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -3144,6 +3144,7 @@ name = "material-gater"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "keyring",

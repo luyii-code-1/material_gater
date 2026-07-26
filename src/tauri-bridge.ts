@@ -1,10 +1,10 @@
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import { confirm, open, save } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import type {
   AppState, BackgroundTask, CopyPreset, CopyRequest, CopyTask, DirectoryEntry, Drive, DriveHealth,
-  MappingInput, MappingProfile, Repository, RepositoryType, Settings, ThumbnailResult
+  FfmpegInfo, MappingInput, MappingProfile, Repository, RepositoryType, Settings, ThumbnailResult
 } from './types';
 
 function subscribe<T>(event: string, callback: (payload: T) => void): () => void {
@@ -27,6 +27,10 @@ window.materialGater = {
     const value = await open({ title, directory: true, multiple: false, canCreateDirectories: true });
     return typeof value === 'string' ? value : null;
   },
+  chooseExecutable: async (title) => {
+    const value = await open({ title, directory: false, multiple: false });
+    return typeof value === 'string' ? value : null;
+  },
   chooseStatisticsExport: () => save({
     title: '导出统计数据',
     defaultPath: `Material-Gater-统计-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -39,8 +43,9 @@ window.materialGater = {
   revealMedia: (target) => revealItemInDir(target),
   showMediaMenu: (target) => invoke<void>('show_media_menu', { target }),
   requestThumbnails: (sources) => invoke<ThumbnailResult[]>('request_thumbnails', { sources }),
+  loadThumbnail: (cachePath) => invoke<string>('load_thumbnail', { cachePath }),
   setThumbnailUserActive: (active) => invoke<void>('set_thumbnail_user_active', { active }),
-  thumbnailUrl: (path) => convertFileSrc(path),
+  detectFfmpeg: (preferred) => invoke<FfmpegInfo>('detect_ffmpeg', { preferred }),
   createLibrary: (options) => invoke('create_library', { options }),
   saveMapping: (mapping: MappingInput) => invoke<{ state: AppState; mapping: MappingProfile }>('save_mapping', { input: mapping }),
   runMapping: (id) => invoke('run_mapping', { id }),

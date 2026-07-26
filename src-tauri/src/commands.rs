@@ -5,7 +5,7 @@ use crate::media::{
 };
 use crate::models::{
     AppState, BackgroundTask, CopyPreset, CopyRequest, DeleteMappingRequest, DirectoryEntry, Drive,
-    DriveHealth, LibraryOptions, MappingInput, MappingProfile, MappingRun, Repository,
+    DriveHealth, FfmpegInfo, LibraryOptions, MappingInput, MappingProfile, MappingRun, Repository,
     RepositoryInput, SettingsPatch, SourceRecord, StatsExportRequest, ThumbnailResult,
 };
 use crate::repository;
@@ -261,8 +261,21 @@ pub fn request_thumbnails(
 }
 
 #[tauri::command]
+pub fn load_thumbnail(
+    state: State<'_, RuntimeState>,
+    cache_path: String,
+) -> std::result::Result<String, String> {
+    command_result(crate::thumbnails::load(&state, &cache_path))
+}
+
+#[tauri::command]
 pub fn set_thumbnail_user_active(state: State<'_, RuntimeState>, active: bool) {
     crate::thumbnails::set_user_active(&state, active);
+}
+
+#[tauri::command]
+pub fn detect_ffmpeg(state: State<'_, RuntimeState>, preferred: Option<String>) -> FfmpegInfo {
+    crate::thumbnails::detect_ffmpeg(&state, preferred)
 }
 
 fn resolve_drive(state: &RuntimeState, source: &str) -> Drive {
@@ -1079,6 +1092,9 @@ pub fn save_settings(
         }
         if let Some(value) = values.keep_running {
             catalog.settings.keep_running = value;
+        }
+        if let Some(value) = values.ffmpeg_path {
+            catalog.settings.ffmpeg_path = value.trim().to_string();
         }
         drop(catalog);
         save_catalog(&state)?;

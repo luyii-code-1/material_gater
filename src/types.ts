@@ -30,7 +30,8 @@ export type CopyFileState = { id: string; source: string; relative: string; size
 export type CopyTask = { id: string; name: string; repositoryId: string; sourceUuid: string; status: 'queued' | 'running' | 'verifying' | 'paused' | 'completed' | 'failed'; totalBytes: number; copiedBytes: number; speed: number; eta: number | null; history: number[]; verifyStatus: string; verifiedBytes: number; verifySpeed: number; verifyEta: number | null; verifyHistory: number[]; verifyError: string; files: CopyFileState[]; error?: string; createdAt: string; updatedAt: string };
 export type BackgroundTask = { id: string; kind: 'scan' | 'index' | 'thumbnail' | string; title: string; detail: string; status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'; current: number; total: number | null; error: string; startedAt: string; updatedAt: string };
 export type ThumbnailResult = { source: string; cachePath: string; ready: boolean };
-export type Settings = { foregroundScanMs: number; backgroundScanMs: number; askBeforeScan: boolean; notifications: boolean; keepRunning: boolean };
+export type FfmpegInfo = { path: string; version: string; valid: boolean };
+export type Settings = { foregroundScanMs: number; backgroundScanMs: number; askBeforeScan: boolean; notifications: boolean; keepRunning: boolean; ffmpegPath: string };
 export type AppState = {
   catalog: { version: number; files: MediaFile[]; sources: SourceRecord[]; mappings: MappingProfile[]; repositories: Repository[]; presets: CopyPreset[]; tasks: CopyTask[]; settings: Settings; lastScan: string | null; source: string | null };
   stats: { count: number; size: number; byDay: StatsGroup; byType: StatsGroup };
@@ -42,12 +43,13 @@ export type CopyRequest = { name: string; sourceUuid: string; repositoryId: stri
 declare global {
   interface Window {
     materialGater: {
-      getState(): Promise<AppState>; getDrives(): Promise<Drive[]>; getBackgroundTasks(): Promise<BackgroundTask[]>; chooseDirectory(title: string): Promise<string | null>;
+      getState(): Promise<AppState>; getDrives(): Promise<Drive[]>; getBackgroundTasks(): Promise<BackgroundTask[]>; chooseDirectory(title: string): Promise<string | null>; chooseExecutable(title: string): Promise<string | null>;
       refreshDrives(): Promise<Drive[]>; getDriveHealth(uuid: string): Promise<DriveHealth>; cancelSourceIndex(uuid: string): Promise<BackgroundTask[]>; setSourceRepository(uuid: string, repositoryOnly: boolean): Promise<AppState>; ejectDrive(uuid: string): Promise<void>;
       chooseStatisticsExport(): Promise<string | null>;
       scan(source: string): Promise<BackgroundTask>; listDirectory(root: string, relative: string): Promise<DirectoryEntry[]>;
       openMedia(target: string): Promise<string>; previewMedia(target: string): Promise<void>; revealMedia(target: string): Promise<void>; showMediaMenu(target: string): Promise<void>;
-      requestThumbnails(sources: string[]): Promise<ThumbnailResult[]>; setThumbnailUserActive(active: boolean): Promise<void>; thumbnailUrl(path: string): string;
+      requestThumbnails(sources: string[]): Promise<ThumbnailResult[]>; loadThumbnail(cachePath: string): Promise<string>; setThumbnailUserActive(active: boolean): Promise<void>;
+      detectFfmpeg(preferred?: string): Promise<FfmpegInfo>;
       createLibrary(options: { destination: string; extensions: string[]; startDate?: string; endDate?: string }): Promise<{ total: number; linked: number; failures: unknown[] }>;
       saveMapping(mapping: MappingInput): Promise<{ state: AppState; mapping: MappingProfile }>;
       runMapping(id: string): Promise<{ state: AppState; result: { total: number; linked: number; failures: unknown[] } }>;
