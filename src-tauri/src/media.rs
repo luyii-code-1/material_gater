@@ -1,6 +1,7 @@
 use crate::models::{DirectoryEntry, Drive, DriveIo, LibraryOptions, MediaFile};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, NaiveDate, Utc};
+#[cfg(target_os = "macos")]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -216,6 +217,7 @@ pub fn list_directory(root: &Path, relative: &str) -> Result<Vec<DirectoryEntry>
     Ok(rows)
 }
 
+#[cfg(target_os = "macos")]
 fn diskutil_value(output: &str, labels: &[&str]) -> String {
     for line in output.lines() {
         let Some((label, value)) = line.split_once(':') else {

@@ -87,10 +87,10 @@ pub fn resolve_data_directory(app: &AppHandle) -> Result<PathBuf> {
         .join("data"))
 }
 
-fn legacy_data_directory(app: &AppHandle) -> Option<PathBuf> {
+fn legacy_data_directory(_app: &AppHandle) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        return app
+        return _app
             .path()
             .home_dir()
             .ok()

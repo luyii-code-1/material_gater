@@ -53,6 +53,7 @@ pub fn refresh_drives(app: AppHandle) -> std::result::Result<Vec<Drive>, String>
     })())
 }
 
+#[cfg(target_os = "macos")]
 fn info_value(output: &str, label: &str) -> String {
     output
         .lines()
