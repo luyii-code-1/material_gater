@@ -57,7 +57,8 @@ jobs:
         shell: pwsh
         run: |
           choco install nasm --yes --no-progress
-          nasm -v
+          "$env:ProgramFiles\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:ProgramFiles\NASM\nasm.exe" -v
 
       - name: Check formatting and code
         run: |
