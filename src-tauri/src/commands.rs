@@ -160,7 +160,7 @@ pub fn set_source_repository(
             let mut catalog = state
                 .catalog
                 .write()
-                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
             update_source(&mut catalog, &drive);
             if let Some(source) = catalog.sources.iter_mut().find(|item| item.uuid == uuid) {
                 source.repository_only = repository_only;
@@ -249,7 +249,22 @@ pub fn resume_background_task(
 pub fn clear_completed_background_tasks(
     app: AppHandle,
 ) -> std::result::Result<Vec<BackgroundTask>, String> {
-    command_result(crate::tasks::clear_completed(&app))
+    command_result(crate::tasks::clear_finished(&app))
+}
+
+#[tauri::command]
+pub fn clear_finished_background_tasks(
+    app: AppHandle,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result(crate::tasks::clear_finished(&app))
+}
+
+#[tauri::command]
+pub fn dismiss_background_task(
+    app: AppHandle,
+    id: String,
+) -> std::result::Result<Vec<BackgroundTask>, String> {
+    command_result(crate::tasks::dismiss(&app, &id))
 }
 
 #[tauri::command]
@@ -358,7 +373,7 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
             crate::tasks::update(
                 app,
                 task_id,
-                Some("扫描素材库"),
+                Some("扫描文件"),
                 Some(format!("{} · 已发现 {count} 个素材", drive.name)),
                 count as u64,
                 None,
@@ -380,7 +395,7 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
     let mapping_options = state
         .catalog
         .read()
-        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+        .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
         .mappings
         .iter()
         .filter(|mapping| mapping.source_uuid == drive.uuid)
@@ -429,7 +444,7 @@ fn scan_source(app: &AppHandle, source: &str, quiet: bool, task_id: &str) -> Res
         let mut catalog = state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
         catalog
             .files
             .retain(|file| file.source_uuid != drive.uuid && file.source != drive.path);
@@ -488,7 +503,7 @@ fn queue_scan(app: &AppHandle, source: &str, quiet: bool) -> Result<BackgroundTa
     let (task, started) = crate::tasks::begin_scan(
         app,
         &drive.uuid,
-        "扫描素材库".into(),
+        "扫描文件".into(),
         format!("{} · 准备读取目录", drive.name),
     )?;
     if started {
@@ -532,7 +547,7 @@ pub fn create_library(
         let files = state
             .catalog
             .read()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
             .files
             .clone();
         Ok(serde_json::to_value(create_virtual_library(
@@ -600,7 +615,7 @@ pub fn save_mapping(
             let mut catalog = state
                 .catalog
                 .write()
-                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
             let index = input.id.as_ref().and_then(|id| {
                 catalog
                     .mappings
@@ -643,17 +658,13 @@ pub fn save_mapping(
     })())
 }
 
-#[tauri::command]
-pub fn run_mapping(
-    state: State<'_, RuntimeState>,
-    id: String,
-) -> std::result::Result<Value, String> {
-    command_result((|| {
+fn run_mapping_blocking(state: &RuntimeState, id: String) -> Result<Value> {
+    (|| {
         let (mapping, files) = {
             let catalog = state
                 .catalog
                 .read()
-                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
             let mapping = catalog
                 .mappings
                 .iter()
@@ -691,7 +702,7 @@ pub fn run_mapping(
             let mut catalog = state
                 .catalog
                 .write()
-                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
             if let Some(value) = catalog
                 .mappings
                 .iter_mut()
@@ -707,9 +718,25 @@ pub fn run_mapping(
                 });
             }
         }
-        save_catalog(&state)?;
-        Ok(json!({ "state": snapshot(&state)?, "result": result }))
-    })())
+        save_catalog(state)?;
+        Ok(json!({ "state": snapshot(state)?, "result": result }))
+    })()
+}
+
+#[tauri::command]
+pub async fn run_mapping(app: AppHandle, id: String) -> std::result::Result<Value, String> {
+    let reason = format!("mapping:{id}");
+    crate::power::set_reason(&app, reason.clone(), true);
+    let worker_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<RuntimeState>();
+        run_mapping_blocking(&state, id)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|value| value);
+    crate::power::set_reason(&app, reason, false);
+    command_result(result)
 }
 
 #[tauri::command]
@@ -721,7 +748,7 @@ pub fn delete_mapping(
         let mapping = state
             .catalog
             .read()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
             .mappings
             .iter()
             .find(|mapping| mapping.id == request.id)
@@ -734,7 +761,7 @@ pub fn delete_mapping(
         state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
             .mappings
             .retain(|value| value.id != mapping.id);
         save_catalog(&state)?;
@@ -799,7 +826,7 @@ pub fn save_repository(
             let mut catalog = state
                 .catalog
                 .write()
-                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
             if repository.is_default {
                 for value in &mut catalog.repositories {
                     value.is_default = false;
@@ -872,7 +899,17 @@ pub fn delete_repository(
         let mut catalog = state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
+        if let Some(task) = catalog
+            .tasks
+            .iter()
+            .find(|task| task.repository_id == id && task.status != "completed")
+        {
+            bail!(
+                "储存位置仍被任务“{}”使用；请先完成任务，或清理该任务记录",
+                task.name
+            );
+        }
         let default = catalog
             .repositories
             .iter()
@@ -905,7 +942,7 @@ pub fn save_preset(
         let mut catalog = state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
         if let Some(index) = catalog
             .presets
             .iter()
@@ -930,7 +967,7 @@ pub fn delete_preset(
         state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
             .presets
             .retain(|value| value.id != id);
         save_catalog(&state)?;
@@ -946,7 +983,7 @@ pub fn create_copy_task(app: AppHandle, input: CopyRequest) -> std::result::Resu
             let catalog = state
                 .catalog
                 .read()
-                .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
             (
                 catalog
                     .files
@@ -954,19 +991,29 @@ pub fn create_copy_task(app: AppHandle, input: CopyRequest) -> std::result::Resu
                     .filter(|file| file.source_uuid == input.source_uuid)
                     .cloned()
                     .collect::<Vec<_>>(),
-                catalog
-                    .repositories
-                    .iter()
-                    .find(|repository| repository.id == input.repository_id)
-                    .cloned()
-                    .context("找不到目标储存库")?,
+                if !input.destination_root.is_empty() {
+                    Repository {
+                        id: String::new(),
+                        name: "临时目标文件夹".into(),
+                        repository_type: "local".into(),
+                        root: input.destination_root.clone(),
+                        ..Repository::default()
+                    }
+                } else {
+                    catalog
+                        .repositories
+                        .iter()
+                        .find(|repository| repository.id == input.repository_id)
+                        .cloned()
+                        .context("找不到目标储存位置")?
+                },
             )
         };
         let task = build_task(&files, &repository, &input)?;
         state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
             .tasks
             .insert(0, task.clone());
         save_catalog(&state)?;
@@ -993,14 +1040,65 @@ pub fn resume_copy_task(app: AppHandle, id: String) -> std::result::Result<AppSt
 
 #[tauri::command]
 pub fn clear_completed_copy_tasks(app: AppHandle) -> std::result::Result<AppState, String> {
+    clear_finished_copy_tasks(app)
+}
+
+fn copy_task_is_finished(status: &str) -> bool {
+    matches!(status, "completed" | "failed")
+}
+
+#[tauri::command]
+pub fn clear_finished_copy_tasks(app: AppHandle) -> std::result::Result<AppState, String> {
     command_result((|| {
         let state = app.state::<RuntimeState>();
-        state
-            .catalog
-            .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
-            .tasks
-            .retain(|task| task.status != "completed");
+        let removed = {
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
+            let removed = catalog
+                .tasks
+                .iter()
+                .filter(|task| copy_task_is_finished(&task.status))
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>();
+            catalog
+                .tasks
+                .retain(|task| !copy_task_is_finished(&task.status));
+            removed
+        };
+        if let Ok(mut pauses) = state.pauses.write() {
+            pauses.retain(|id, _| !removed.contains(id));
+        }
+        save_catalog(&state)?;
+        let result = snapshot(&state)?;
+        let _ = app.emit("copy-changed", result.catalog.tasks.clone());
+        Ok(result)
+    })())
+}
+
+#[tauri::command]
+pub fn dismiss_copy_task(app: AppHandle, id: String) -> std::result::Result<AppState, String> {
+    command_result((|| {
+        let state = app.state::<RuntimeState>();
+        {
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
+            let task = catalog
+                .tasks
+                .iter()
+                .find(|task| task.id == id)
+                .context("找不到拷贝任务")?;
+            if !copy_task_is_finished(&task.status) {
+                bail!("运行中或已暂停的拷贝任务不能清理");
+            }
+            catalog.tasks.retain(|task| task.id != id);
+        }
+        if let Ok(mut pauses) = state.pauses.write() {
+            pauses.remove(&id);
+        }
         save_catalog(&state)?;
         let result = snapshot(&state)?;
         let _ = app.emit("copy-changed", result.catalog.tasks.clone());
@@ -1021,7 +1119,7 @@ pub fn export_statistics(
         let files = state
             .catalog
             .read()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
             .files
             .iter()
             .filter(|file| {
@@ -1070,14 +1168,15 @@ pub fn export_statistics(
 
 #[tauri::command]
 pub fn save_settings(
-    state: State<'_, RuntimeState>,
+    app: AppHandle,
     values: SettingsPatch,
 ) -> std::result::Result<AppState, String> {
     command_result((|| {
+        let state = app.state::<RuntimeState>();
         let mut catalog = state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
         if let Some(value) = values.foreground_scan_ms {
             catalog.settings.foreground_scan_ms = value.max(500);
         }
@@ -1096,8 +1195,21 @@ pub fn save_settings(
         if let Some(value) = values.ffmpeg_path {
             catalog.settings.ffmpeg_path = value.trim().to_string();
         }
+        if let Some(value) = values.prevent_sleep_copy {
+            catalog.settings.prevent_sleep_copy = value;
+        }
+        if let Some(value) = values.prevent_sleep_scan {
+            catalog.settings.prevent_sleep_scan = value;
+        }
+        if let Some(value) = values.prevent_sleep_mapping {
+            catalog.settings.prevent_sleep_mapping = value;
+        }
+        if let Some(value) = values.prevent_sleep_app {
+            catalog.settings.prevent_sleep_app = value;
+        }
         drop(catalog);
         save_catalog(&state)?;
+        crate::power::refresh(&app);
         snapshot(&state)
     })())
 }
@@ -1108,7 +1220,7 @@ pub fn clear_catalog(state: State<'_, RuntimeState>) -> std::result::Result<AppS
         let mut catalog = state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
         catalog.files.clear();
         catalog.last_scan = None;
         catalog.source = None;
@@ -1128,6 +1240,20 @@ pub fn show_window(window: WebviewWindow) -> std::result::Result<(), String> {
         window.set_focus()?;
         Ok(())
     })())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_task_is_finished;
+
+    #[test]
+    fn copy_task_cleanup_includes_failed_tasks() {
+        assert!(copy_task_is_finished("completed"));
+        assert!(copy_task_is_finished("failed"));
+        assert!(!copy_task_is_finished("running"));
+        assert!(!copy_task_is_finished("paused"));
+        assert!(!copy_task_is_finished("verifying"));
+    }
 }
 
 #[tauri::command]

@@ -82,6 +82,9 @@ pub fn begin(
     drop(tasks);
     drop(active);
     emit(app);
+    if kind == "scan" {
+        crate::power::set_reason(app, format!("scan:{}", task.id), true);
+    }
     Ok((task, true))
 }
 
@@ -146,6 +149,7 @@ pub fn pause(app: &AppHandle, id: &str) -> Result<()> {
         task.updated_at = Utc::now().to_rfc3339();
     }
     emit(app);
+    crate::power::set_reason(app, format!("scan:{id}"), false);
     Ok(())
 }
 
@@ -166,21 +170,81 @@ pub fn resume(app: &AppHandle, id: &str) -> Result<()> {
         task.updated_at = Utc::now().to_rfc3339();
     }
     emit(app);
+    crate::power::set_reason(app, format!("scan:{id}"), true);
     Ok(())
 }
 
-pub fn clear_completed(app: &AppHandle) -> Result<Vec<BackgroundTask>> {
+fn is_finished(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+pub fn clear_finished(app: &AppHandle) -> Result<Vec<BackgroundTask>> {
     let state = app.state::<RuntimeState>();
-    let remaining = {
+    let (remaining, removed) = {
         let mut tasks = state
             .background_tasks
             .write()
             .map_err(|_| anyhow!("后台任务锁已损坏"))?;
-        tasks.retain(|task| task.status != "completed" && task.status != "cancelled");
-        tasks.clone()
+        let removed = tasks
+            .iter()
+            .filter(|task| is_finished(&task.status))
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        tasks.retain(|task| !is_finished(&task.status));
+        (tasks.clone(), removed)
     };
+    if let Ok(mut controls) = state.background_pauses.write() {
+        controls.retain(|id, _| !removed.contains(id));
+    }
+    if let Ok(mut active) = state.active_scans.lock() {
+        active.retain(|_, task_id| !removed.contains(task_id));
+    }
+    if let Ok(mut thumbnail_task) = state.thumbnail_task.lock()
+        && thumbnail_task
+            .as_ref()
+            .is_some_and(|id| removed.contains(id))
+    {
+        *thumbnail_task = None;
+    }
     emit(app);
     Ok(remaining)
+}
+
+pub fn dismiss(app: &AppHandle, id: &str) -> Result<Vec<BackgroundTask>> {
+    let state = app.state::<RuntimeState>();
+    {
+        let mut tasks = state
+            .background_tasks
+            .write()
+            .map_err(|_| anyhow!("后台任务锁已损坏"))?;
+        let task = tasks
+            .iter()
+            .find(|task| task.id == id)
+            .ok_or_else(|| anyhow!("找不到后台任务"))?;
+        if !is_finished(&task.status) {
+            return Err(anyhow!("运行中或已暂停的任务不能清理"));
+        }
+        tasks.retain(|task| task.id != id);
+    }
+    if let Ok(mut controls) = state.background_pauses.write() {
+        controls.remove(id);
+    }
+    if let Ok(mut active) = state.active_scans.lock() {
+        active.retain(|_, task_id| task_id != id);
+    }
+    if let Ok(mut thumbnail_task) = state.thumbnail_task.lock()
+        && thumbnail_task.as_deref() == Some(id)
+    {
+        *thumbnail_task = None;
+    }
+    emit(app);
+    crate::power::set_reason(app, format!("scan:{id}"), false);
+    list(&state)
+}
+
+#[allow(dead_code)]
+pub fn clear_completed(app: &AppHandle) -> Result<Vec<BackgroundTask>> {
+    clear_finished(app)
 }
 
 pub fn cancel_key(app: &AppHandle, key: &str) -> Result<Vec<BackgroundTask>> {
@@ -202,6 +266,7 @@ pub fn cancel_key(app: &AppHandle, key: &str) -> Result<Vec<BackgroundTask>> {
         task.updated_at = Utc::now().to_rfc3339();
     }
     emit(app);
+    crate::power::set_reason(app, format!("scan:{id}"), false);
     list(&state)
 }
 
@@ -240,6 +305,7 @@ fn finish(app: &AppHandle, id: &str, key: &str, status: &str, error: String) {
         }
     }
     emit(app);
+    crate::power::set_reason(app, format!("scan:{id}"), false);
 }
 
 pub fn complete(app: &AppHandle, id: &str, key: &str) {
@@ -248,4 +314,18 @@ pub fn complete(app: &AppHandle, id: &str, key: &str) {
 
 pub fn fail(app: &AppHandle, id: &str, key: &str, error: String) {
     finish(app, id, key, "failed", error);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_finished;
+
+    #[test]
+    fn finished_task_filter_includes_failures_and_cancellations() {
+        assert!(is_finished("completed"));
+        assert!(is_finished("failed"));
+        assert!(is_finished("cancelled"));
+        assert!(!is_finished("running"));
+        assert!(!is_finished("paused"));
+    }
 }

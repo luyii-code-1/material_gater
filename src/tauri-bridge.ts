@@ -4,7 +4,7 @@ import { confirm, open, save } from '@tauri-apps/plugin-dialog';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import type {
   AppState, BackgroundTask, CopyPreset, CopyRequest, CopyTask, DirectoryEntry, Drive, DriveHealth,
-  FfmpegInfo, MappingInput, MappingProfile, Repository, RepositoryType, Settings, ThumbnailResult
+  MappingInput, MappingProfile, Repository, RepositoryType, Settings
 } from './types';
 
 function subscribe<T>(event: string, callback: (payload: T) => void): () => void {
@@ -27,10 +27,12 @@ window.materialGater = {
     const value = await open({ title, directory: true, multiple: false, canCreateDirectories: true });
     return typeof value === 'string' ? value : null;
   },
-  chooseExecutable: async (title) => {
-    const value = await open({ title, directory: false, multiple: false });
-    return typeof value === 'string' ? value : null;
-  },
+  confirmAction: ({ title, message, okLabel = '确认', kind = 'warning' }) => confirm(message, {
+    title,
+    kind,
+    okLabel,
+    cancelLabel: '取消'
+  }),
   chooseStatisticsExport: () => save({
     title: '导出统计数据',
     defaultPath: `Material-Gater-统计-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -42,11 +44,6 @@ window.materialGater = {
   previewMedia: (target) => invoke<void>('preview_media', { target }),
   revealMedia: (target) => revealItemInDir(target),
   showMediaMenu: (target) => invoke<void>('show_media_menu', { target }),
-  requestThumbnails: (sources) => invoke<ThumbnailResult[]>('request_thumbnails', { sources }),
-  loadThumbnail: (cachePath) => invoke<string>('load_thumbnail', { cachePath }),
-  setThumbnailUserActive: (active) => invoke<void>('set_thumbnail_user_active', { active }),
-  detectFfmpeg: (preferred) => invoke<FfmpegInfo>('detect_ffmpeg', { preferred }),
-  createLibrary: (options) => invoke('create_library', { options }),
   saveMapping: (mapping: MappingInput) => invoke<{ state: AppState; mapping: MappingProfile }>('save_mapping', { input: mapping }),
   runMapping: (id) => invoke('run_mapping', { id }),
   deleteMapping: (request) => invoke('delete_mapping', { request }),
@@ -59,9 +56,13 @@ window.materialGater = {
   pauseCopyTask: (id) => invoke<AppState>('pause_copy_task', { id }),
   resumeCopyTask: (id) => invoke<AppState>('resume_copy_task', { id }),
   clearCompletedCopyTasks: () => invoke<AppState>('clear_completed_copy_tasks'),
+  clearFinishedCopyTasks: () => invoke<AppState>('clear_finished_copy_tasks'),
+  dismissCopyTask: (id) => invoke<AppState>('dismiss_copy_task', { id }),
   pauseBackgroundTask: (id) => invoke<BackgroundTask[]>('pause_background_task', { id }),
   resumeBackgroundTask: (id) => invoke<BackgroundTask[]>('resume_background_task', { id }),
   clearCompletedBackgroundTasks: () => invoke<BackgroundTask[]>('clear_completed_background_tasks'),
+  clearFinishedBackgroundTasks: () => invoke<BackgroundTask[]>('clear_finished_background_tasks'),
+  dismissBackgroundTask: (id) => invoke<BackgroundTask[]>('dismiss_background_task', { id }),
   exportStatistics: (request) => invoke<string>('export_statistics', { request }),
   saveSettings: (settings: Partial<Settings>) => invoke<AppState>('save_settings', { values: settings }),
   clearCatalog: () => invoke<AppState>('clear_catalog'),
@@ -71,17 +72,16 @@ window.materialGater = {
   onStateChanged: (callback) => subscribe('state-changed', callback),
   onCopyChanged: (callback) => subscribe('copy-changed', callback),
   onBackgroundTasksChanged: (callback) => subscribe('background-tasks-changed', callback),
-  onThumbnailReady: (callback) => subscribe('thumbnail-ready', callback),
   onSourceRemoved: (callback) => subscribe('source-removed', callback),
   onScanCompleted: (callback) => subscribe('scan-completed', callback)
 };
 
 void listen<Drive>('drive-detected', async ({ payload: drive }) => {
   await invoke('show_window');
-  const accepted = await confirm(`检测到“${drive.name}”\n\n是否立即扫描并刷新素材库？`, {
+  const accepted = await confirm(`检测到“${drive.name}”\n\n是否立即扫描此磁盘中的文件？`, {
     title: '检测到素材盘',
     kind: 'info',
-    okLabel: '扫描素材',
+    okLabel: '扫描文件',
     cancelLabel: '稍后'
   });
   if (accepted) await invoke('scan_media', { source: drive.path });

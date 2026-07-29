@@ -3,6 +3,7 @@ mod commands;
 mod copy_engine;
 mod media;
 mod models;
+mod power;
 mod repository;
 mod storage;
 mod tasks;
@@ -39,6 +40,7 @@ pub fn run() {
             let data_dir = resolve_data_directory(app.handle())?;
             let catalog = load_catalog(app.handle(), &data_dir)?;
             app.manage(RuntimeState::new(catalog, data_dir));
+            power::set_reason(app.handle(), "app".into(), true);
             thumbnails::cleanup(&app.state::<RuntimeState>())?;
 
             app.on_menu_event(|app, event| {
@@ -132,6 +134,8 @@ pub fn run() {
             commands::pause_background_task,
             commands::resume_background_task,
             commands::clear_completed_background_tasks,
+            commands::clear_finished_background_tasks,
+            commands::dismiss_background_task,
             commands::request_thumbnails,
             commands::load_thumbnail,
             commands::set_thumbnail_user_active,
@@ -151,6 +155,8 @@ pub fn run() {
             commands::pause_copy_task,
             commands::resume_copy_task,
             commands::clear_completed_copy_tasks,
+            commands::clear_finished_copy_tasks,
+            commands::dismiss_copy_task,
             commands::export_statistics,
             commands::save_settings,
             commands::clear_catalog,
@@ -162,8 +168,11 @@ pub fn run() {
         .expect("无法启动 Material Gater");
 
     app.run(|app, event| {
+        if matches!(&event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
+            power::shutdown(app);
+        }
         #[cfg(target_os = "macos")]
-        if matches!(event, RunEvent::Reopen { .. }) {
+        if matches!(&event, RunEvent::Reopen { .. }) {
             show_main(app);
         }
         #[cfg(not(target_os = "macos"))]

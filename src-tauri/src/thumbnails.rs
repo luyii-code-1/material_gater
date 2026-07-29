@@ -14,7 +14,7 @@ fn cache_directory(state: &RuntimeState) -> PathBuf {
 }
 
 fn cache_path(state: &RuntimeState, source: &str) -> PathBuf {
-    let key = blake3::hash(format!("thumbnail-v2\0{source}").as_bytes())
+    let key = blake3::hash(format!("thumbnail-v3\0{source}").as_bytes())
         .to_hex()
         .to_string();
     cache_directory(state).join(format!("{key}.png"))
@@ -134,22 +134,41 @@ pub fn detect_ffmpeg(state: &RuntimeState, preferred: Option<String>) -> FfmpegI
     })
 }
 
-fn generate_video(
+fn cached_thumbnail_ready(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+fn video_thumbnail_ready(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.len() > 512)
+        .unwrap_or(false)
+}
+
+fn generate_video_attempt(
     ffmpeg: &Path,
     source: &Path,
     destination: &Path,
+    seek: &str,
     seek_before_input: bool,
+    representative_frame: bool,
 ) -> Result<()> {
     let _ = fs::remove_file(destination);
     let mut command = Command::new(ffmpeg);
     command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
     if seek_before_input {
-        command.args(["-ss", "1"]);
+        command.args(["-ss", seek]);
     }
     command.arg("-i").arg(source);
     if !seek_before_input {
-        command.args(["-ss", "0"]);
+        command.args(["-ss", seek]);
     }
+    let filter = if representative_frame {
+        "thumbnail=24,scale=320:-2:force_original_aspect_ratio=decrease:flags=lanczos,format=rgb24"
+    } else {
+        "scale=320:-2:force_original_aspect_ratio=decrease:flags=lanczos,format=rgb24"
+    };
     let status = command
         .args([
             "-map",
@@ -160,7 +179,7 @@ fn generate_video(
             "-frames:v",
             "1",
             "-vf",
-            "scale=320:-2:force_original_aspect_ratio=decrease:flags=lanczos,format=rgb24",
+            filter,
             "-c:v",
             "png",
             "-pix_fmt",
@@ -172,15 +191,40 @@ fn generate_video(
         .arg(destination)
         .status()
         .context("无法调用 FFmpeg 视频解码器")?;
-    let ready = destination
-        .metadata()
-        .map(|metadata| metadata.len() > 0)
-        .unwrap_or(false);
-    if status.success() && ready {
+    if status.success() && video_thumbnail_ready(destination) {
         Ok(())
     } else {
         bail!("FFmpeg 无法解码该视频帧")
     }
+}
+
+fn generate_video(ffmpeg: &Path, source: &Path, destination: &Path) -> Result<()> {
+    let attempts = [
+        ("1", true, true),
+        ("3", true, true),
+        ("8", true, true),
+        ("0", false, true),
+        ("1", true, false),
+        ("0", false, false),
+    ];
+    let mut last_error = None;
+    for (seek, before_input, representative_frame) in attempts {
+        match generate_video_attempt(
+            ffmpeg,
+            source,
+            destination,
+            seek,
+            before_input,
+            representative_frame,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        bail!("FFmpeg 无法生成可用视频缩略图：{error}")
+    }
+    bail!("FFmpeg 无法生成可用视频缩略图")
 }
 
 #[cfg(target_os = "macos")]
@@ -212,10 +256,7 @@ fn generate(source: &Path, destination: &Path, ffmpeg: Option<&Path>) -> Result<
         "mov" | "mp4" | "m4v" | "mxf" | "avi" | "mkv" | "r3d" | "braw"
     ) {
         let ffmpeg = ffmpeg.context("未找到可用的 FFmpeg 视频解码器")?;
-        if generate_video(ffmpeg, source, destination, true).is_ok() {
-            return Ok(());
-        }
-        return generate_video(ffmpeg, source, destination, false);
+        return generate_video(ffmpeg, source, destination);
     }
 
     bail!("该文件类型不支持缩略图")
@@ -233,10 +274,7 @@ fn generate(source: &Path, destination: &Path, ffmpeg: Option<&Path>) -> Result<
         "mov" | "mp4" | "m4v" | "mxf" | "avi" | "mkv" | "r3d" | "braw"
     ) {
         let ffmpeg = ffmpeg.context("未找到可用的 FFmpeg 视频解码器")?;
-        if generate_video(ffmpeg, source, destination, true).is_ok() {
-            return Ok(());
-        }
-        return generate_video(ffmpeg, source, destination, false);
+        return generate_video(ffmpeg, source, destination);
     }
     let script = r#"
 param([string]$Source,[string]$Destination)
@@ -268,10 +306,7 @@ $thumb.Dispose(); $image.Dispose()
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn generate(source: &Path, destination: &Path, ffmpeg: Option<&Path>) -> Result<()> {
     let ffmpeg = ffmpeg.context("未找到可用的 FFmpeg 视频解码器")?;
-    if generate_video(ffmpeg, source, destination, true).is_ok() {
-        return Ok(());
-    }
-    generate_video(ffmpeg, source, destination, false)
+    generate_video(ffmpeg, source, destination)
 }
 
 fn start_worker(app: &AppHandle) {
@@ -298,6 +333,7 @@ fn start_worker(app: &AppHandle) {
             *value = Some(task.id.clone());
         }
         let mut completed = 0_u64;
+        let mut failed = 0_u64;
         let mut ffmpeg_setting = String::new();
         let mut ffmpeg_path: Option<PathBuf> = None;
         let mut ffmpeg_resolved = false;
@@ -315,7 +351,7 @@ fn start_worker(app: &AppHandle) {
                     &task.id,
                     None,
                     Some("检测到用户操作，等待空闲后继续".into()),
-                    completed,
+                    completed + failed,
                     None,
                 );
                 tokio::time::sleep(Duration::from_millis(180)).await;
@@ -330,7 +366,8 @@ fn start_worker(app: &AppHandle) {
                 .ok()
                 .and_then(|mut queue| queue.pop_front());
             let Some(source) = source else { break };
-            let total = completed
+            let processed = completed + failed;
+            let total = processed
                 + 1
                 + app
                     .state::<RuntimeState>()
@@ -349,7 +386,7 @@ fn start_worker(app: &AppHandle) {
                         .to_string_lossy()
                         .into_owned(),
                 ),
-                completed,
+                processed,
                 Some(total),
             );
             let destination = cache_path(&app.state::<RuntimeState>(), &source);
@@ -389,17 +426,37 @@ fn start_worker(app: &AppHandle) {
                         ready: true,
                     },
                 );
+            } else {
+                failed += 1;
+                let _ = app.emit(
+                    "thumbnail-ready",
+                    ThumbnailResult {
+                        source,
+                        cache_path: destination.to_string_lossy().into_owned(),
+                        ready: false,
+                    },
+                );
             }
         }
+        let processed = completed + failed;
+        let detail = if failed > 0 {
+            format!("已生成 {completed} 个缩略图，{failed} 个失败")
+        } else {
+            format!("已生成 {completed} 个缩略图")
+        };
         crate::tasks::update(
             &app,
             &task.id,
             None,
-            Some(format!("已生成 {completed} 个缩略图")),
-            completed,
-            Some(completed),
+            Some(detail.clone()),
+            processed,
+            Some(processed),
         );
-        crate::tasks::complete(&app, &task.id, key);
+        if failed > 0 {
+            crate::tasks::fail(&app, &task.id, key, detail);
+        } else {
+            crate::tasks::complete(&app, &task.id, key);
+        }
         let state = app.state::<RuntimeState>();
         state.thumbnail_worker.store(false, Ordering::Release);
         if let Ok(mut value) = state.thumbnail_task.lock() {
@@ -425,7 +482,7 @@ pub fn request(app: &AppHandle, sources: Vec<String>) -> Result<Vec<ThumbnailRes
             continue;
         }
         let destination = cache_path(&state, &source);
-        let ready = destination.is_file();
+        let ready = cached_thumbnail_ready(&destination);
         results.push(ThumbnailResult {
             source: source.clone(),
             cache_path: destination.to_string_lossy().into_owned(),

@@ -177,6 +177,7 @@ pub struct CopyTask {
     pub id: String,
     pub name: String,
     pub repository_id: String,
+    pub destination_root: String,
     pub source_uuid: String,
     pub status: String,
     pub total_bytes: u64,
@@ -239,6 +240,14 @@ pub struct Settings {
     pub keep_running: bool,
     #[serde(default)]
     pub ffmpeg_path: String,
+    #[serde(default)]
+    pub prevent_sleep_copy: bool,
+    #[serde(default)]
+    pub prevent_sleep_scan: bool,
+    #[serde(default)]
+    pub prevent_sleep_mapping: bool,
+    #[serde(default)]
+    pub prevent_sleep_app: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -250,6 +259,10 @@ pub struct SettingsPatch {
     pub notifications: Option<bool>,
     pub keep_running: Option<bool>,
     pub ffmpeg_path: Option<String>,
+    pub prevent_sleep_copy: Option<bool>,
+    pub prevent_sleep_scan: Option<bool>,
+    pub prevent_sleep_mapping: Option<bool>,
+    pub prevent_sleep_app: Option<bool>,
 }
 
 impl Default for Settings {
@@ -261,6 +274,10 @@ impl Default for Settings {
             notifications: true,
             keep_running: true,
             ffmpeg_path: String::new(),
+            prevent_sleep_copy: false,
+            prevent_sleep_scan: false,
+            prevent_sleep_mapping: false,
+            prevent_sleep_app: false,
         }
     }
 }
@@ -345,6 +362,7 @@ pub struct CopyRequest {
     pub name: String,
     pub source_uuid: String,
     pub repository_id: String,
+    pub destination_root: String,
     pub selection: CopySelection,
     pub path_template: String,
     pub note: String,

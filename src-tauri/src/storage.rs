@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -31,6 +32,8 @@ pub struct RuntimeState {
     pub thumbnail_queue: Mutex<VecDeque<String>>,
     pub thumbnail_requested: Mutex<HashSet<String>>,
     pub thumbnail_task: Mutex<Option<String>>,
+    pub sleep_reasons: Mutex<HashSet<String>>,
+    pub sleep_process: Mutex<Option<Child>>,
 }
 
 impl RuntimeState {
@@ -54,6 +57,8 @@ impl RuntimeState {
             thumbnail_queue: Mutex::new(VecDeque::new()),
             thumbnail_requested: Mutex::new(HashSet::new()),
             thumbnail_task: Mutex::new(None),
+            sleep_reasons: Mutex::new(HashSet::new()),
+            sleep_process: Mutex::new(None),
         }
     }
 }
@@ -109,7 +114,7 @@ pub fn load_catalog(app: &AppHandle, data_dir: &Path) -> Result<Catalog> {
         && legacy.exists()
     {
         fs::copy(&legacy, &destination)
-            .with_context(|| format!("无法迁移旧素材库：{}", legacy.display()))?;
+            .with_context(|| format!("无法迁移旧文件索引：{}", legacy.display()))?;
     }
     let mut catalog = match fs::read_to_string(&destination) {
         Ok(text) => serde_json::from_str::<Catalog>(&text).unwrap_or_default(),
@@ -164,11 +169,11 @@ pub fn save_catalog(state: &RuntimeState) -> Result<()> {
     let _save = state
         .catalog_save
         .lock()
-        .map_err(|_| anyhow::anyhow!("素材库保存锁已损坏"))?;
+        .map_err(|_| anyhow::anyhow!("文件索引保存锁已损坏"))?;
     let catalog = state
         .catalog
         .read()
-        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+        .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
     save_catalog_to(&state.data_dir, &catalog)
 }
 
@@ -176,14 +181,14 @@ fn save_catalog_to(data_dir: &Path, catalog: &Catalog) -> Result<()> {
     fs::create_dir_all(data_dir)?;
     let destination = data_dir.join("catalog.json");
     let temporary = data_dir.join("catalog.json.tmp");
-    let file = File::create(&temporary).context("无法创建素材库临时文件")?;
+    let file = File::create(&temporary).context("无法创建文件索引临时文件")?;
     let mut writer = BufWriter::new(file);
-    serde_json::to_writer(&mut writer, catalog).context("无法写入素材库")?;
-    writer.flush().context("无法刷新素材库")?;
+    serde_json::to_writer(&mut writer, catalog).context("无法写入文件索引")?;
+    writer.flush().context("无法刷新文件索引")?;
     if destination.exists() {
         let _ = fs::remove_file(&destination);
     }
-    fs::rename(&temporary, &destination).context("无法提交素材库更新")?;
+    fs::rename(&temporary, &destination).context("无法提交文件索引更新")?;
     Ok(())
 }
 
@@ -237,7 +242,7 @@ pub fn snapshot(state: &RuntimeState) -> Result<AppState> {
     let mut catalog = state
         .catalog
         .read()
-        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+        .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
         .clone();
     let online_ids: HashSet<String> = drives
         .iter()

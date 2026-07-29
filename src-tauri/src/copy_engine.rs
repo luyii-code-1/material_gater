@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::mpsc;
@@ -48,14 +49,9 @@ fn safe_segment(value: &str) -> String {
 fn expand_template(template: &str, file: &MediaFile, note: &str) -> PathBuf {
     let inline_note = regex::Regex::new(r#"%note\("([^"]*)"\)"#).expect("valid regex");
     let expanded = inline_note
-        .replace_all(
-            if template.trim().is_empty() {
-                "%day/%note"
-            } else {
-                template
-            },
-            |captures: &regex::Captures<'_>| safe_segment(&captures[1]),
-        )
+        .replace_all(template.trim(), |captures: &regex::Captures<'_>| {
+            safe_segment(&captures[1])
+        })
         .replace("%day", &local_day(&file.captured_at))
         .replace("%time", &local_time(&file.captured_at))
         .replace("%note", &safe_segment(note));
@@ -169,6 +165,7 @@ pub fn build_task(
             input.name.trim().chars().take(80).collect()
         },
         repository_id: repository.id.clone(),
+        destination_root: input.destination_root.clone(),
         source_uuid: input.source_uuid.clone(),
         status: "queued".into(),
         total_bytes,
@@ -200,19 +197,29 @@ fn task_and_repository(state: &RuntimeState, id: &str) -> Result<(CopyTask, Repo
     let catalog = state
         .catalog
         .read()
-        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+        .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
     let task = catalog
         .tasks
         .iter()
         .find(|task| task.id == id)
         .cloned()
         .context("找不到拷贝任务")?;
-    let repository = catalog
-        .repositories
-        .iter()
-        .find(|repository| repository.id == task.repository_id)
-        .cloned()
-        .context("储存库已被删除")?;
+    let repository = if !task.destination_root.is_empty() {
+        Repository {
+            id: task.repository_id.clone(),
+            name: "临时目标文件夹".into(),
+            repository_type: "local".into(),
+            root: task.destination_root.clone(),
+            ..Repository::default()
+        }
+    } else {
+        catalog
+            .repositories
+            .iter()
+            .find(|repository| repository.id == task.repository_id)
+            .cloned()
+            .context("储存位置已被删除")?
+    };
     Ok((task, repository))
 }
 
@@ -225,7 +232,7 @@ where
         let mut catalog = state
             .catalog
             .write()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
         let task = catalog
             .tasks
             .iter_mut()
@@ -239,7 +246,7 @@ where
     let tasks = state
         .catalog
         .read()
-        .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?
+        .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?
         .tasks
         .clone();
     let _ = app.emit("copy-changed", tasks);
@@ -421,6 +428,19 @@ fn verification_progress(
         }
         Ok(())
     }
+}
+
+fn finish_transfer_phase(task: &mut CopyTask) {
+    for file in &mut task.files {
+        file.copied = file.size;
+        if matches!(file.status.as_str(), "queued" | "copying" | "hashing") {
+            file.status = "copied".into();
+        }
+    }
+    task.copied_bytes = task.total_bytes;
+    task.status = "verifying".into();
+    task.speed = 0.0;
+    task.eta = Some(0);
 }
 
 async fn verify_job(
@@ -617,11 +637,7 @@ async fn execute_pipeline(
             .map_err(|_| anyhow::anyhow!("文件校验任务意外结束"))?;
     }
     drop(verify_tx);
-    update_task(app, &task.id, |task| {
-        task.status = "verifying".into();
-        task.speed = 0.0;
-        task.eta = Some(0);
-    })?;
+    update_task(app, &task.id, finish_transfer_phase)?;
     verifier.await??;
     Ok(())
 }
@@ -629,71 +645,119 @@ async fn execute_pipeline(
 async fn execute_task(app: AppHandle, id: String, pause: Arc<AtomicBool>) {
     let state = app.state::<RuntimeState>();
     let Ok((task, repository)) = task_and_repository(&state, &id) else {
-        let _ = update_task(&app, &id, |task| {
-            task.status = "failed".into();
-            task.error = "储存库已被删除".into();
-        });
+        if owns_task_control(&state, &id, &pause) {
+            let _ = update_task(&app, &id, |task| {
+                task.status = "failed".into();
+                task.error = "储存库已被删除".into();
+            });
+        }
+        release_task_control(&state, &id, &pause);
+        crate::power::set_reason(&app, format!("copy:{id}"), false);
         return;
     };
     let password = read_password(&repository.id);
     let result = execute_pipeline(&app, &task, &repository, &password, pause.clone()).await;
-    match result {
-        Ok(()) => {
-            let _ = update_task(&app, &id, |task| {
-                task.status = "completed".into();
-                task.copied_bytes = task.total_bytes;
-                task.speed = 0.0;
-                task.eta = Some(0);
-                task.error.clear();
-                task.verify_status = "completed".into();
-                task.verified_bytes = task.total_bytes;
-                task.verify_speed = 0.0;
-                task.verify_eta = Some(0);
-                task.verify_error.clear();
-            });
-        }
-        Err(_error) if pause.load(Ordering::Relaxed) => {
-            let _ = update_task(&app, &id, |task| {
-                task.status = "paused".into();
-                task.speed = 0.0;
-                task.error.clear();
-                task.verify_status = "paused".into();
-                task.verify_speed = 0.0;
-                if let Some(file) = task.files.iter_mut().find(|file| file.status == "copying") {
-                    file.status = "queued".into();
+    if owns_task_control(&state, &id, &pause) {
+        match result {
+            Ok(()) => {
+                if let Ok(completed) = update_task(&app, &id, |task| {
+                    task.status = "completed".into();
+                    task.copied_bytes = task.total_bytes;
+                    task.speed = 0.0;
+                    task.eta = Some(0);
+                    task.error.clear();
+                    task.verify_status = "completed".into();
+                    task.verified_bytes = task.total_bytes;
+                    task.verify_speed = 0.0;
+                    task.verify_eta = Some(0);
+                    task.verify_error.clear();
+                }) {
+                    let background = app.get_webview_window("main").is_none_or(|window| {
+                        !window.is_visible().unwrap_or(false)
+                            || !window.is_focused().unwrap_or(false)
+                    });
+                    let enabled = state
+                        .catalog
+                        .read()
+                        .ok()
+                        .is_none_or(|catalog| catalog.settings.notifications);
+                    if background && enabled {
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("拷贝完成")
+                            .body(format!(
+                                "{} · {} 个文件",
+                                completed.name,
+                                completed.files.len()
+                            ))
+                            .auto_cancel()
+                            .show();
+                    }
                 }
-                for file in &mut task.files {
-                    if file.status == "hashing" {
+            }
+            Err(_error) if pause.load(Ordering::Relaxed) => {
+                let _ = update_task(&app, &id, |task| {
+                    task.status = "paused".into();
+                    task.speed = 0.0;
+                    task.error.clear();
+                    task.verify_status = "paused".into();
+                    task.verify_speed = 0.0;
+                    if let Some(file) = task.files.iter_mut().find(|file| file.status == "copying")
+                    {
                         file.status = "queued".into();
                     }
-                    if file.verify_status == "verifying" {
-                        file.verify_status = "queued".into();
+                    for file in &mut task.files {
+                        if file.status == "hashing" {
+                            file.status = "queued".into();
+                        }
+                        if file.verify_status == "verifying" {
+                            file.verify_status = "queued".into();
+                        }
                     }
-                }
-            });
-        }
-        Err(error) => {
-            let message = error.to_string();
-            let _ = update_task(&app, &id, |task| {
-                task.status = "failed".into();
-                task.speed = 0.0;
-                task.error = message.clone();
-                if task.verify_status == "running" {
-                    task.verify_status = "failed".into();
-                    task.verify_error = message.clone();
-                }
-                if let Some(file) = task.files.iter_mut().find(|file| file.status == "copying") {
-                    file.status = "failed".into();
-                    file.error = message;
-                }
-            });
+                });
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = update_task(&app, &id, |task| {
+                    task.status = "failed".into();
+                    task.speed = 0.0;
+                    task.error = message.clone();
+                    if task.verify_status == "running" {
+                        task.verify_status = "failed".into();
+                        task.verify_error = message.clone();
+                    }
+                    if let Some(file) = task.files.iter_mut().find(|file| file.status == "copying")
+                    {
+                        file.status = "failed".into();
+                        file.error = message;
+                    }
+                });
+            }
         }
     }
+    release_task_control(&state, &id, &pause);
+    crate::power::set_reason(&app, format!("copy:{id}"), false);
+}
+
+fn owns_task_control(state: &RuntimeState, id: &str, pause: &Arc<AtomicBool>) -> bool {
     state
         .pauses
-        .write()
+        .read()
         .ok()
-        .map(|mut values| values.remove(&id));
+        .and_then(|values| values.get(id).cloned())
+        .is_some_and(|current| Arc::ptr_eq(&current, pause))
+}
+
+fn release_task_control(state: &RuntimeState, id: &str, pause: &Arc<AtomicBool>) {
+    if let Ok(mut values) = state.pauses.write() {
+        let owns_control = values
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, pause));
+        if owns_control {
+            values.remove(id);
+        }
+    }
 }
 
 pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
@@ -702,7 +766,7 @@ pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
         let catalog = state
             .catalog
             .read()
-            .map_err(|_| anyhow::anyhow!("素材库锁已损坏"))?;
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
         let task = catalog
             .tasks
             .iter()
@@ -716,12 +780,15 @@ pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
         }
     }
     let pause = Arc::new(AtomicBool::new(false));
-    state
+    let previous = state
         .pauses
         .write()
         .map_err(|_| anyhow::anyhow!("任务锁已损坏"))?
         .insert(id.into(), pause.clone());
-    update_task(app, id, |task| {
+    if let Some(previous) = previous {
+        previous.store(true, Ordering::Relaxed);
+    }
+    if let Err(error) = update_task(app, id, |task| {
         task.status = "running".into();
         task.verify_status = "queued".into();
         task.error.clear();
@@ -730,7 +797,11 @@ pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
             .iter()
             .map(|file| file.copied.min(file.size))
             .sum();
-    })?;
+    }) {
+        release_task_control(&state, id, &pause);
+        return Err(error);
+    }
+    crate::power::set_reason(app, format!("copy:{id}"), true);
     let app = app.clone();
     let id = id.to_string();
     tauri::async_runtime::spawn(execute_task(app, id, pause));
@@ -739,22 +810,34 @@ pub fn start_task(app: &AppHandle, id: &str) -> Result<()> {
 
 pub fn pause_task(app: &AppHandle, id: &str) -> Result<()> {
     let state = app.state::<RuntimeState>();
+    {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
+        let task = catalog
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .context("找不到拷贝任务")?;
+        if !matches!(task.status.as_str(), "running" | "verifying" | "queued") {
+            bail!("只有运行中或等待中的任务可以暂停");
+        }
+    }
     let pause = state
         .pauses
         .read()
         .map_err(|_| anyhow::anyhow!("任务锁已损坏"))?
         .get(id)
-        .cloned();
-    if let Some(pause) = pause {
-        pause.store(true, Ordering::Relaxed);
-    }
+        .cloned()
+        .context("任务执行器已经结束")?;
+    pause.store(true, Ordering::Relaxed);
+    crate::power::set_reason(app, format!("copy:{id}"), false);
     update_task(app, id, |task| {
-        if task.status != "completed" {
-            task.status = "paused".into();
-            task.verify_status = "paused".into();
-            task.speed = 0.0;
-            task.verify_speed = 0.0;
-        }
+        task.status = "paused".into();
+        task.verify_status = "paused".into();
+        task.speed = 0.0;
+        task.verify_speed = 0.0;
     })?;
     Ok(())
 }
@@ -805,6 +888,86 @@ mod tests {
                 .relative
                 .ends_with(&format!("DCIM{}clip.mov", std::path::MAIN_SEPARATOR))
         );
+    }
+
+    #[test]
+    fn custom_destination_with_empty_template_targets_root() {
+        let file = media(Path::new("/tmp/clip.mov"));
+        let repository = Repository {
+            repository_type: "local".into(),
+            root: "/tmp/custom-target".into(),
+            ..Repository::default()
+        };
+        let request = CopyRequest {
+            source_uuid: "source".into(),
+            destination_root: "/tmp/custom-target".into(),
+            mode: "flat".into(),
+            selection: crate::models::CopySelection {
+                file_ids: vec!["media-1".into()],
+                ..crate::models::CopySelection::default()
+            },
+            ..CopyRequest::default()
+        };
+        let task = build_task(&[file], &repository, &request).expect("task");
+        assert_eq!(task.destination_root, "/tmp/custom-target");
+        assert_eq!(task.files[0].relative, "clip.mov");
+    }
+
+    #[test]
+    fn stale_executor_cannot_release_replacement_control() {
+        let state = RuntimeState::new(crate::models::Catalog::default(), PathBuf::new());
+        let first = Arc::new(AtomicBool::new(false));
+        let replacement = Arc::new(AtomicBool::new(false));
+        state
+            .pauses
+            .write()
+            .expect("task controls")
+            .insert("task".into(), first.clone());
+        state
+            .pauses
+            .write()
+            .expect("task controls")
+            .insert("task".into(), replacement.clone());
+
+        assert!(!owns_task_control(&state, "task", &first));
+        assert!(owns_task_control(&state, "task", &replacement));
+        release_task_control(&state, "task", &first);
+        assert!(owns_task_control(&state, "task", &replacement));
+    }
+
+    #[test]
+    fn entering_verification_reconciles_transfer_progress() {
+        let mut task = CopyTask {
+            total_bytes: 300,
+            copied_bytes: 100,
+            status: "running".into(),
+            speed: 42.0,
+            eta: Some(9),
+            files: vec![
+                CopyFileState {
+                    size: 100,
+                    copied: 100,
+                    status: "copied".into(),
+                    ..CopyFileState::default()
+                },
+                CopyFileState {
+                    size: 200,
+                    copied: 0,
+                    status: "queued".into(),
+                    ..CopyFileState::default()
+                },
+            ],
+            ..CopyTask::default()
+        };
+
+        finish_transfer_phase(&mut task);
+
+        assert_eq!(task.status, "verifying");
+        assert_eq!(task.copied_bytes, task.total_bytes);
+        assert!(task.files.iter().all(|file| file.copied == file.size));
+        assert!(task.files.iter().all(|file| file.status == "copied"));
+        assert_eq!(task.speed, 0.0);
+        assert_eq!(task.eta, Some(0));
     }
 
     #[tokio::test]
