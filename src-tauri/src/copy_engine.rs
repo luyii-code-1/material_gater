@@ -862,11 +862,12 @@ mod tests {
 
     #[test]
     fn task_expands_templates_and_original_paths() {
-        let file = media(Path::new("/tmp/clip.mov"));
+        let temp = std::env::temp_dir();
+        let file = media(&temp.join("clip.mov"));
         let repository = Repository {
             id: "repo".into(),
             repository_type: "local".into(),
-            root: "/tmp/vault".into(),
+            root: temp.join("vault").to_string_lossy().into_owned(),
             ..Repository::default()
         };
         let request = CopyRequest {
@@ -892,15 +893,18 @@ mod tests {
 
     #[test]
     fn custom_destination_with_empty_template_targets_root() {
-        let file = media(Path::new("/tmp/clip.mov"));
+        let temp = std::env::temp_dir();
+        let target = temp.join("custom-target");
+        let target = target.to_string_lossy().into_owned();
+        let file = media(&temp.join("clip.mov"));
         let repository = Repository {
             repository_type: "local".into(),
-            root: "/tmp/custom-target".into(),
+            root: target.clone(),
             ..Repository::default()
         };
         let request = CopyRequest {
             source_uuid: "source".into(),
-            destination_root: "/tmp/custom-target".into(),
+            destination_root: target.clone(),
             mode: "flat".into(),
             selection: crate::models::CopySelection {
                 file_ids: vec!["media-1".into()],
@@ -909,7 +913,7 @@ mod tests {
             ..CopyRequest::default()
         };
         let task = build_task(&[file], &repository, &request).expect("task");
-        assert_eq!(task.destination_root, "/tmp/custom-target");
+        assert_eq!(task.destination_root, target);
         assert_eq!(task.files[0].relative, "clip.mov");
     }
 
