@@ -1,6 +1,6 @@
 [package]
 name = "material-gater"
-version = "0.7.0"
+version = "0.7.1"
 description = "跨平台素材拷贝、筛选与映射管理工具"
 authors = ["luyii-code-1"]
 license = "MIT"
