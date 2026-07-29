@@ -52,6 +52,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --yes --no-progress
+          nasm -v
+
       - name: Check formatting and code
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
