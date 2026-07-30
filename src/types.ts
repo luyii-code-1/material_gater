@@ -11,6 +11,7 @@ export type StatsGroup = Record<string, { count: number; size: number }>;
 export type MappingProfile = {
   id: string; name: string; source: string; sourceUuid?: string; destination: string; extensions: string[];
   startDate: string; endDate: string; createdAt: string; updatedAt: string; mounted?: boolean; mountError?: string;
+  enabled?: boolean;
   mode: 'flat' | 'original'; groupByDay: boolean;
   lastRun: null | { at: string; total: number; linked: number; failed: number };
 };
@@ -49,6 +50,7 @@ declare global {
       openMedia(target: string): Promise<string>; previewMedia(target: string): Promise<void>; revealMedia(target: string): Promise<void>; showMediaMenu(target: string): Promise<void>;
       saveMapping(mapping: MappingInput): Promise<{ state: AppState; mapping: MappingProfile }>;
       runMapping(id: string): Promise<{ state: AppState; result: { total: number; linked: number; failures: unknown[] } }>;
+      setMappingEnabled(id: string, enabled: boolean): Promise<{ state: AppState; cleanup: null | { removed: number; kept: boolean; message: string } }>;
       deleteMapping(request: { id: string; cleanup: boolean }): Promise<{ state: AppState; cleanup: null | { removed: number; kept: boolean; message: string } }>;
       saveRepository(repository: Partial<Repository> & { name: string; type: RepositoryType; password?: string }): Promise<AppState>;
       testRepository(repository: Partial<Repository> & { name: string; type: RepositoryType; password?: string }): Promise<{ ok: boolean; message: string }>;

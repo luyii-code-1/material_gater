@@ -103,7 +103,7 @@ fn mount_known_mappings(app: &AppHandle, drive: &Drive) {
     for mapping in catalog
         .mappings
         .iter_mut()
-        .filter(|mapping| mapping.source_uuid == drive.uuid)
+        .filter(|mapping| mapping.enabled && mapping.source_uuid == drive.uuid)
     {
         let options = LibraryOptions {
             id: mapping.id.clone(),

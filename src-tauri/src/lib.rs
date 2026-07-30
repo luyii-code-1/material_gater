@@ -145,6 +145,7 @@ pub fn run() {
             commands::create_library,
             commands::save_mapping,
             commands::run_mapping,
+            commands::set_mapping_enabled,
             commands::delete_mapping,
             commands::save_repository,
             commands::test_repository,

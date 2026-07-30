@@ -80,9 +80,15 @@ pub struct MappingProfile {
     pub group_by_day: bool,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default = "default_mapping_enabled")]
+    pub enabled: bool,
     pub mounted: bool,
     pub mount_error: String,
     pub last_run: Option<MappingRun>,
+}
+
+fn default_mapping_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

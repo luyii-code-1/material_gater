@@ -308,3 +308,43 @@ pub fn summarize(files: &[crate::models::MediaFile]) -> Stats {
         by_type,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{MediaFile, SourceRecord};
+
+    #[test]
+    fn snapshot_excludes_index_and_statistics_for_offline_sources() {
+        let catalog = Catalog {
+            files: vec![MediaFile {
+                id: "offline-file".into(),
+                name: "A001.mov".into(),
+                path: "/Volumes/Camera/A001.mov".into(),
+                relative_path: "A001.mov".into(),
+                extension: ".mov".into(),
+                size: 1_024,
+                captured_at: "2026-07-29T12:00:00+08:00".into(),
+                modified_at: "2026-07-29T12:00:00+08:00".into(),
+                source: "/Volumes/Camera".into(),
+                source_uuid: "camera-card".into(),
+            }],
+            sources: vec![SourceRecord {
+                uuid: "camera-card".into(),
+                name: "Camera".into(),
+                last_path: "/Volumes/Camera".into(),
+                online: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let state = RuntimeState::new(catalog, PathBuf::new());
+
+        let snapshot = snapshot(&state).expect("snapshot should succeed");
+
+        assert!(snapshot.catalog.files.is_empty());
+        assert_eq!(snapshot.stats.count, 0);
+        assert_eq!(snapshot.stats.size, 0);
+        assert!(!snapshot.catalog.sources[0].online);
+    }
+}

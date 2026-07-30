@@ -599,6 +599,30 @@ fn validated_mapping(input: MappingInput, drives: &[Drive]) -> Result<MappingInp
     })
 }
 
+fn mapping_destinations_overlap(first: &str, second: &str) -> bool {
+    let first = std::fs::canonicalize(first).unwrap_or_else(|_| PathBuf::from(first));
+    let second = std::fs::canonicalize(second).unwrap_or_else(|_| PathBuf::from(second));
+    first.starts_with(&second) || second.starts_with(&first)
+}
+
+fn ensure_mapping_destination_available(
+    catalog: &crate::models::Catalog,
+    mapping_id: Option<&str>,
+    destination: &str,
+) -> Result<()> {
+    if let Some(conflict) = catalog.mappings.iter().find(|mapping| {
+        mapping.enabled
+            && mapping.id != mapping_id.unwrap_or_default()
+            && mapping_destinations_overlap(&mapping.destination, destination)
+    }) {
+        bail!(
+            "映射目标与“{}”重叠，请为每个已启用映射选择独立目录",
+            conflict.name
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_mapping(
     state: State<'_, RuntimeState>,
@@ -624,6 +648,11 @@ pub fn save_mapping(
                     .position(|mapping| &mapping.id == id)
             });
             let previous = index.and_then(|index| catalog.mappings.get(index)).cloned();
+            ensure_mapping_destination_available(
+                &catalog,
+                input.id.as_deref(),
+                &input.destination,
+            )?;
             let mapping = MappingProfile {
                 id: input.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
                 name: input.name,
@@ -640,6 +669,7 @@ pub fn save_mapping(
                     .map(|value| value.created_at.clone())
                     .unwrap_or_else(|| now.clone()),
                 updated_at: now,
+                enabled: previous.as_ref().is_none_or(|value| value.enabled),
                 mounted: previous.as_ref().is_some_and(|value| value.mounted),
                 mount_error: previous
                     .as_ref()
@@ -661,6 +691,11 @@ pub fn save_mapping(
 
 fn run_mapping_blocking(state: &RuntimeState, id: String) -> Result<Value> {
     (|| {
+        let drives = state
+            .drives
+            .read()
+            .map_err(|_| anyhow::anyhow!("磁盘状态锁已损坏"))?
+            .clone();
         let (mapping, files) = {
             let catalog = state
                 .catalog
@@ -672,6 +707,26 @@ fn run_mapping_blocking(state: &RuntimeState, id: String) -> Result<Value> {
                 .find(|mapping| mapping.id == id)
                 .cloned()
                 .context("找不到该映射")?;
+            if !mapping.enabled {
+                bail!("映射已关闭");
+            }
+            let source_online = if mapping.source_uuid.is_empty() {
+                drives.iter().any(|drive| drive.path == mapping.source)
+            } else {
+                drives.iter().any(|drive| drive.uuid == mapping.source_uuid)
+                    || catalog
+                        .sources
+                        .iter()
+                        .any(|source| source.uuid == mapping.source_uuid && source.online)
+            };
+            if !source_online {
+                bail!("素材源离线");
+            }
+            ensure_mapping_destination_available(
+                &catalog,
+                Some(&mapping.id),
+                &mapping.destination,
+            )?;
             let files: Vec<_> = catalog
                 .files
                 .iter()
@@ -722,6 +777,41 @@ fn run_mapping_blocking(state: &RuntimeState, id: String) -> Result<Value> {
         save_catalog(state)?;
         Ok(json!({ "state": snapshot(state)?, "result": result }))
     })()
+}
+
+#[tauri::command]
+pub fn set_mapping_enabled(
+    state: State<'_, RuntimeState>,
+    id: String,
+    enabled: bool,
+) -> std::result::Result<Value, String> {
+    command_result((|| {
+        let cleanup = {
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| anyhow::anyhow!("文件索引锁已损坏"))?;
+            let index = catalog
+                .mappings
+                .iter()
+                .position(|mapping| mapping.id == id)
+                .context("找不到该映射")?;
+            if enabled {
+                let destination = catalog.mappings[index].destination.clone();
+                ensure_mapping_destination_available(&catalog, Some(&id), &destination)?;
+                catalog.mappings[index].enabled = true;
+                None
+            } else {
+                let mapping = &mut catalog.mappings[index];
+                mapping.enabled = false;
+                mapping.mounted = false;
+                mapping.mount_error.clear();
+                Some(cleanup_virtual_library(&mapping.destination, &mapping.id)?)
+            }
+        };
+        save_catalog(&state)?;
+        Ok(json!({ "state": snapshot(&state)?, "cleanup": cleanup }))
+    })())
 }
 
 #[tauri::command]
@@ -1245,7 +1335,7 @@ pub fn show_window(window: WebviewWindow) -> std::result::Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_task_is_finished;
+    use super::{copy_task_is_finished, mapping_destinations_overlap};
 
     #[test]
     fn copy_task_cleanup_includes_failed_tasks() {
@@ -1254,6 +1344,22 @@ mod tests {
         assert!(!copy_task_is_finished("running"));
         assert!(!copy_task_is_finished("paused"));
         assert!(!copy_task_is_finished("verifying"));
+    }
+
+    #[test]
+    fn mapping_destination_conflicts_include_nested_directories() {
+        assert!(mapping_destinations_overlap(
+            "/tmp/material-gater-map",
+            "/tmp/material-gater-map/child"
+        ));
+        assert!(mapping_destinations_overlap(
+            "/tmp/material-gater-map/child",
+            "/tmp/material-gater-map"
+        ));
+        assert!(!mapping_destinations_overlap(
+            "/tmp/material-gater-map-a",
+            "/tmp/material-gater-map-b"
+        ));
     }
 }
 

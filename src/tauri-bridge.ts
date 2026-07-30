@@ -46,6 +46,7 @@ window.materialGater = {
   showMediaMenu: (target) => invoke<void>('show_media_menu', { target }),
   saveMapping: (mapping: MappingInput) => invoke<{ state: AppState; mapping: MappingProfile }>('save_mapping', { input: mapping }),
   runMapping: (id) => invoke('run_mapping', { id }),
+  setMappingEnabled: (id, enabled) => invoke('set_mapping_enabled', { id, enabled }),
   deleteMapping: (request) => invoke('delete_mapping', { request }),
   saveRepository: (repository: Partial<Repository> & { name: string; type: RepositoryType; password?: string }) => invoke<AppState>('save_repository', { input: repository }),
   testRepository: (repository) => invoke('test_repository', { input: repository }),
